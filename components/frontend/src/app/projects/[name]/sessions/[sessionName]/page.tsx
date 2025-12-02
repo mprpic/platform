@@ -62,6 +62,7 @@ import { Label } from "@/components/ui/label";
 import { Breadcrumbs } from "@/components/breadcrumbs";
 import { SessionHeader } from "./session-header";
 import { getPhaseColor } from "@/utils/session-helpers";
+import { EditableSessionName } from "@/components/editable-session-name";
 
 // Extracted components
 import { AddContextModal } from "./components/modals/add-context-modal";
@@ -92,6 +93,7 @@ import {
   useSendControlMessage,
   useSessionK8sResources,
   useContinueSession,
+  useUpdateSessionDisplayName,
 } from "@/services/queries";
 import {
   useWorkspaceList,
@@ -173,6 +175,7 @@ export default function ProjectSessionDetailPage({
   const continueMutation = useContinueSession();
   const sendChatMutation = useSendChatMessage();
   const sendControlMutation = useSendControlMessage();
+  const updateDisplayNameMutation = useUpdateSessionDisplayName();
 
   // Workflow management hook
   const workflowManagement = useWorkflowManagement({
@@ -551,6 +554,22 @@ export default function ProjectSessionDetailPage({
     );
   };
 
+  const handleUpdateDisplayName = async (newDisplayName: string) => {
+    try {
+      await updateDisplayNameMutation.mutateAsync({
+        projectName,
+        sessionName,
+        displayName: newDisplayName,
+      });
+      successToast("Session name updated successfully");
+    } catch (err) {
+      errorToast(
+        err instanceof Error ? err.message : "Failed to update session name",
+      );
+      throw err; // Re-throw to let EditableSessionName handle the error state
+    }
+  };
+
   // Auto-spawn content pod on completed session
   const sessionCompleted =
     session?.status?.phase === "Completed" ||
@@ -736,20 +755,23 @@ export default function ProjectSessionDetailPage({
                         label: "Sessions",
                         href: `/projects/${projectName}/sessions`,
                       },
-                      {
-                        label: session.spec.displayName || session.metadata.name,
-                        rightIcon: (
-                          <Badge
-                            className={getPhaseColor(
-                              session.status?.phase || "Pending",
-                            )}
-                          >
-                            {session.status?.phase || "Pending"}
-                          </Badge>
-                        ),
-                      },
                     ]}
                   />
+                  <div className="flex items-center gap-3 mt-2">
+                    <EditableSessionName
+                      currentName={session.spec.displayName || session.metadata.name}
+                      onSave={handleUpdateDisplayName}
+                      isSaving={updateDisplayNameMutation.isPending}
+                      className="text-lg font-semibold"
+                    />
+                    <Badge
+                      className={getPhaseColor(
+                        session.status?.phase || "Pending",
+                      )}
+                    >
+                      {session.status?.phase || "Pending"}
+                    </Badge>
+                  </div>
                 </div>
 
                 {/* Kebab menu (both mobile and desktop) */}

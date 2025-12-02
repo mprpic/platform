@@ -131,6 +131,20 @@ export async function deleteSession(
 }
 
 /**
+ * Update session display name
+ */
+export async function updateSessionDisplayName(
+  projectName: string,
+  sessionName: string,
+  displayName: string
+): Promise<AgenticSession> {
+  return apiClient.put<AgenticSession, { displayName: string }>(
+    `/projects/${projectName}/agentic-sessions/${sessionName}/displayname`,
+    { displayName }
+  );
+}
+
+/**
  * Send a chat message to an interactive session
  */
 export async function sendChatMessage(

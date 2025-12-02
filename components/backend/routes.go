@@ -50,6 +50,7 @@ func registerRoutes(r *gin.Engine) {
 			projectGroup.POST("/agentic-sessions", handlers.CreateSession)
 			projectGroup.GET("/agentic-sessions/:sessionName", handlers.GetSession)
 			projectGroup.PUT("/agentic-sessions/:sessionName", handlers.UpdateSession)
+			projectGroup.PUT("/agentic-sessions/:sessionName/displayname", handlers.UpdateSessionDisplayName)
 			projectGroup.PATCH("/agentic-sessions/:sessionName", handlers.PatchSession)
 			projectGroup.DELETE("/agentic-sessions/:sessionName", handlers.DeleteSession)
 			projectGroup.POST("/agentic-sessions/:sessionName/clone", handlers.CloneSession)
