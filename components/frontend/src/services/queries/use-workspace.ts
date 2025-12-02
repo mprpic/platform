@@ -34,7 +34,7 @@ export function useWorkspaceList(
     queryKey: workspaceKeys.list(projectName, sessionName, path),
     queryFn: () => workspaceApi.listWorkspace(projectName, sessionName, path),
     enabled: !!projectName && !!sessionName && (options?.enabled ?? true),
-    staleTime: 5 * 1000, // 5 seconds
+    staleTime: 30 * 1000, // 30 seconds (increased from 5s for better performance)
   });
 }
 
@@ -51,7 +51,7 @@ export function useWorkspaceFile(
     queryKey: workspaceKeys.file(projectName, sessionName, path),
     queryFn: () => workspaceApi.readWorkspaceFile(projectName, sessionName, path),
     enabled: !!projectName && !!sessionName && !!path && (options?.enabled ?? true),
-    staleTime: 10 * 1000, // 10 seconds
+    staleTime: 60 * 1000, // 60 seconds (increased from 10s for better performance)
   });
 }
 
@@ -102,7 +102,7 @@ export function useSessionGitHubDiff(
     queryFn: () =>
       workspaceApi.getSessionGitHubDiff(projectName, sessionName, repoIndex, repoPath),
     enabled: !!projectName && !!sessionName && (options?.enabled ?? true),
-    staleTime: 10 * 1000, // 10 seconds
+    staleTime: 30 * 1000, // 30 seconds (increased from 10s for better performance)
   });
 }
 
@@ -150,14 +150,14 @@ export function useAllSessionGitHubDiffs(
       return totals;
     },
     enabled: !!projectName && !!sessionName && !!repos && (options?.enabled ?? true),
-    staleTime: 10 * 1000, // 10 seconds
+    staleTime: 30 * 1000, // 30 seconds (increased from 10s for better performance)
     // Poll for diff updates when session is running
     refetchInterval: () => {
       const isRunning =
         options?.sessionPhase === 'Running' ||
         options?.sessionPhase === 'Creating' ||
         options?.sessionPhase === 'Pending';
-      return isRunning ? 10000 : false; // Poll every 10 seconds if running
+      return isRunning ? 30000 : false; // Poll every 30 seconds if running (reduced frequency)
     },
   });
 }
@@ -238,7 +238,7 @@ export function useGitMergeStatus(
     queryKey: [...workspaceKeys.all, 'git-merge-status', projectName, sessionName, path, branch],
     queryFn: () => workspaceApi.getGitMergeStatus(projectName, sessionName, path, branch),
     enabled: enabled && !!projectName && !!sessionName,
-    staleTime: 5000, // 5 seconds - merge status can change frequently
+    staleTime: 30000, // 30 seconds (increased from 5s for better performance)
   });
 }
 
@@ -364,7 +364,7 @@ export function useGitStatus(
     queryKey: [...workspaceKeys.all, 'git-status', projectName, sessionName, path],
     queryFn: () => workspaceApi.gitStatus(projectName, sessionName, path),
     enabled: !!projectName && !!sessionName && !!path && (options?.enabled ?? true),
-    staleTime: 5000, // 5 seconds - status can change frequently
+    staleTime: 20000, // 20 seconds (increased from 5s for better performance)
   });
 }
 
