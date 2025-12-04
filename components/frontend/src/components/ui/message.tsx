@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { cn } from "@/lib/utils";
+import { cn, formatMessageTimestamp } from "@/lib/utils";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -18,6 +18,7 @@ export type MessageProps = {
   components?: Components;
   borderless?: boolean;
   actions?: React.ReactNode;
+  timestamp?: string;
 };
 
 const defaultComponents: Components = {
@@ -169,7 +170,7 @@ export const LoadingDots = () => {
 
 export const Message = React.forwardRef<HTMLDivElement, MessageProps>(
   (
-    { role, content, isLoading, className, components, borderless, actions, ...props },
+    { role, content, isLoading, className, components, borderless, actions, timestamp, ...props },
     ref
   ) => {
     const isBot = role === "bot";
@@ -203,7 +204,7 @@ export const Message = React.forwardRef<HTMLDivElement, MessageProps>(
             <div className={cn(
               borderless ? "p-0" : "rounded-lg p-3",
               !borderless && (isBot ? "bg-card" : "bg-border/30")
-            )}> 
+            )}>
               {/* Content */}
               <div className="text-sm text-foreground">
                 {isLoading ? (
@@ -220,6 +221,13 @@ export const Message = React.forwardRef<HTMLDivElement, MessageProps>(
                   </ReactMarkdown>
                 )}
               </div>
+
+              {/* Timestamp */}
+              {timestamp && !isLoading && (
+                <div className={cn("text-xs text-muted-foreground/60", borderless ? "mt-1" : "mt-2")}>
+                  {formatMessageTimestamp(timestamp)}
+                </div>
+              )}
 
               {actions ? (
                 <div className={cn(borderless ? "mt-1" : "mt-3 pt-2 border-t")}>{actions}</div>
