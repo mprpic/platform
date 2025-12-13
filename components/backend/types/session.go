@@ -1,14 +1,17 @@
 package types
 
 // AgenticSession represents the structure of our custom resource
+// @Description Kubernetes custom resource representing an AI-powered agentic session
 type AgenticSession struct {
-	APIVersion string                 `json:"apiVersion"`
-	Kind       string                 `json:"kind"`
+	APIVersion string                 `json:"apiVersion" example:"vteam.ambient-code/v1alpha1"`
+	Kind       string                 `json:"kind" example:"AgenticSession"`
 	Metadata   map[string]interface{} `json:"metadata"`
 	Spec       AgenticSessionSpec     `json:"spec"`
 	Status     *AgenticSessionStatus  `json:"status,omitempty"`
 }
 
+// AgenticSessionSpec defines the desired state of an agentic session
+// @Description Configuration for an agentic session including prompt, repos, and LLM settings
 type AgenticSessionSpec struct {
 	InitialPrompt        string             `json:"initialPrompt,omitempty"`
 	Interactive          bool               `json:"interactive,omitempty"`
@@ -44,31 +47,37 @@ type AgenticSessionStatus struct {
 	Conditions         []Condition         `json:"conditions,omitempty"`
 }
 
+// CreateAgenticSessionRequest represents the request body for creating an agentic session
+// @Description Request payload for creating a new agentic session with AI agent configuration
 type CreateAgenticSessionRequest struct {
-	InitialPrompt   string       `json:"initialPrompt,omitempty"`
-	DisplayName     string       `json:"displayName,omitempty"`
+	InitialPrompt   string       `json:"initialPrompt,omitempty" example:"Implement feature XYZ with tests"`
+	DisplayName     string       `json:"displayName,omitempty" example:"Feature XYZ Implementation"`
 	LLMSettings     *LLMSettings `json:"llmSettings,omitempty"`
-	Timeout         *int         `json:"timeout,omitempty"`
-	Interactive     *bool        `json:"interactive,omitempty"`
-	ParentSessionID string       `json:"parent_session_id,omitempty"`
+	Timeout         *int         `json:"timeout,omitempty" example:"3600"`
+	Interactive     *bool        `json:"interactive,omitempty" example:"false"`
+	ParentSessionID string       `json:"parent_session_id,omitempty" example:"parent-session-123"`
 	// Multi-repo support
 	Repos                []SimpleRepo      `json:"repos,omitempty"`
-	AutoPushOnComplete   *bool             `json:"autoPushOnComplete,omitempty"`
+	AutoPushOnComplete   *bool             `json:"autoPushOnComplete,omitempty" example:"true"`
 	UserContext          *UserContext      `json:"userContext,omitempty"`
 	EnvironmentVariables map[string]string `json:"environmentVariables,omitempty"`
 	Labels               map[string]string `json:"labels,omitempty"`
 	Annotations          map[string]string `json:"annotations,omitempty"`
 }
 
+// CloneSessionRequest represents the request body for cloning a session
+// @Description Request to clone an existing session to a new project
 type CloneSessionRequest struct {
-	TargetProject  string `json:"targetProject" binding:"required"`
-	NewSessionName string `json:"newSessionName" binding:"required"`
+	TargetProject  string `json:"targetProject" binding:"required" example:"my-new-project"`
+	NewSessionName string `json:"newSessionName" binding:"required" example:"cloned-session"`
 }
 
+// UpdateAgenticSessionRequest represents the request body for updating a session
+// @Description Request payload for updating an existing agentic session
 type UpdateAgenticSessionRequest struct {
-	InitialPrompt *string      `json:"initialPrompt,omitempty"`
-	DisplayName   *string      `json:"displayName,omitempty"`
-	Timeout       *int         `json:"timeout,omitempty"`
+	InitialPrompt *string      `json:"initialPrompt,omitempty" example:"Updated prompt text"`
+	DisplayName   *string      `json:"displayName,omitempty" example:"Updated Display Name"`
+	Timeout       *int         `json:"timeout,omitempty" example:"7200"`
 	LLMSettings   *LLMSettings `json:"llmSettings,omitempty"`
 }
 

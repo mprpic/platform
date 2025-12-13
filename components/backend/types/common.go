@@ -3,33 +3,43 @@ package types
 
 // Common types used across the application
 
+// GitRepository represents a Git repository configuration
+// @Description Git repository URL and branch information
 type GitRepository struct {
-	URL      string       `json:"url"`
-	Branch   *string      `json:"branch,omitempty"`
+	URL      string       `json:"url" example:"https://github.com/org/repo.git"`
+	Branch   *string      `json:"branch,omitempty" example:"main"`
 	Provider ProviderType `json:"provider,omitempty"` // Optional: auto-detected if not specified
 }
 
+// UserContext contains user identity information
+// @Description User authentication and authorization context
 type UserContext struct {
-	UserID      string   `json:"userId" binding:"required"`
-	DisplayName string   `json:"displayName" binding:"required"`
-	Groups      []string `json:"groups" binding:"required"`
+	UserID      string   `json:"userId" binding:"required" example:"user123"`
+	DisplayName string   `json:"displayName" binding:"required" example:"John Doe"`
+	Groups      []string `json:"groups" binding:"required" example:"developers,admins"`
 }
 
+// BotAccountRef references a bot service account
+// @Description Reference to a Kubernetes service account for bot operations
 type BotAccountRef struct {
-	Name string `json:"name" binding:"required"`
+	Name string `json:"name" binding:"required" example:"bot-account"`
 }
 
+// ResourceOverrides specifies custom resource limits
+// @Description Kubernetes resource overrides for session pods
 type ResourceOverrides struct {
-	CPU           string `json:"cpu,omitempty"`
-	Memory        string `json:"memory,omitempty"`
-	StorageClass  string `json:"storageClass,omitempty"`
-	PriorityClass string `json:"priorityClass,omitempty"`
+	CPU           string `json:"cpu,omitempty" example:"2000m"`
+	Memory        string `json:"memory,omitempty" example:"4Gi"`
+	StorageClass  string `json:"storageClass,omitempty" example:"fast-ssd"`
+	PriorityClass string `json:"priorityClass,omitempty" example:"high-priority"`
 }
 
+// LLMSettings configures the language model
+// @Description Language model configuration including model, temperature, and token limits
 type LLMSettings struct {
-	Model       string  `json:"model"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"maxTokens"`
+	Model       string  `json:"model" example:"claude-sonnet-4"`
+	Temperature float64 `json:"temperature" example:"0.7"`
+	MaxTokens   int     `json:"maxTokens" example:"4096"`
 }
 
 type GitConfig struct {
@@ -96,22 +106,24 @@ func IntPtr(i int) *int {
 }
 
 // PaginationParams represents common pagination request parameters
+// @Description Pagination parameters for list endpoints
 type PaginationParams struct {
-	Limit    int    `form:"limit"`    // Number of items per page (default: 20, max: 100)
-	Offset   int    `form:"offset"`   // Offset for offset-based pagination
-	Continue string `form:"continue"` // Continuation token for k8s-style pagination
-	Search   string `form:"search"`   // Search/filter term
+	Limit    int    `form:"limit" example:"20"`     // Number of items per page (default: 20, max: 100)
+	Offset   int    `form:"offset" example:"0"`     // Offset for offset-based pagination
+	Continue string `form:"continue" example:""`    // Continuation token for k8s-style pagination
+	Search   string `form:"search" example:"query"` // Search/filter term
 }
 
 // PaginatedResponse is a generic paginated response structure
+// @Description Generic paginated response with items and pagination metadata
 type PaginatedResponse struct {
 	Items      interface{} `json:"items"`
-	TotalCount int         `json:"totalCount"`
-	Limit      int         `json:"limit"`
-	Offset     int         `json:"offset"`
-	HasMore    bool        `json:"hasMore"`
-	Continue   string      `json:"continue,omitempty"`   // For k8s-style pagination
-	NextOffset *int        `json:"nextOffset,omitempty"` // For offset-based pagination
+	TotalCount int         `json:"totalCount" example:"100"`
+	Limit      int         `json:"limit" example:"20"`
+	Offset     int         `json:"offset" example:"0"`
+	HasMore    bool        `json:"hasMore" example:"true"`
+	Continue   string      `json:"continue,omitempty" example:"continue-token"`   // For k8s-style pagination
+	NextOffset *int        `json:"nextOffset,omitempty" example:"20"` // For offset-based pagination
 }
 
 // DefaultPaginationLimit is the default number of items per page
