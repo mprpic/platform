@@ -61,6 +61,16 @@ func parseOwnerRepo(full string) (string, string, error) {
 
 // AccessCheck verifies if the caller has write access to ProjectSettings in the project namespace
 // It performs a Kubernetes SelfSubjectAccessReview using the caller token (user or API key).
+// @Summary      Check project access
+// @Description  Verifies if the authenticated user has write access to ProjectSettings in the project namespace and returns their role (view/edit/admin)
+// @Tags         repositories
+// @Security     BearerAuth
+// @Produce      json
+// @Param        projectName  path      string                 true  "Project name (Kubernetes namespace)"
+// @Success      200  {object}  map[string]interface{}  "Access check result with project name, allowed status, reason, and user role"
+// @Failure      401  {object}  map[string]string       "Unauthorized - invalid or missing token"
+// @Failure      500  {object}  map[string]string       "Internal server error"
+// @Router       /projects/{projectName}/access [get]
 func AccessCheck(c *gin.Context) {
 	projectName := c.Param("projectName")
 	reqK8s, _ := GetK8sClientsForRequestRepo(c)
@@ -117,6 +127,18 @@ func AccessCheck(c *gin.Context) {
 
 // ListUserForks handles GET /projects/:projectName/users/forks
 // List user forks for an upstream repo (RBAC-scoped)
+// @Summary      List user forks
+// @Description  Lists all accessible forks of an upstream GitHub repository (includes public and any accessible private forks)
+// @Tags         repositories
+// @Security     BearerAuth
+// @Produce      json
+// @Param        projectName   path      string                 true   "Project name (Kubernetes namespace)"
+// @Param        upstreamRepo  query     string                 true   "Upstream repository (owner/repo or full URL)"
+// @Success      200  {object}  map[string]interface{}  "List of forks with name, fullName, and URL"
+// @Failure      400  {object}  map[string]string       "Invalid request - missing upstreamRepo or invalid format"
+// @Failure      401  {object}  map[string]string       "Unauthorized - invalid or missing GitHub token"
+// @Failure      502  {object}  map[string]string       "GitHub request failed"
+// @Router       /projects/{projectName}/users/forks [get]
 func ListUserForks(c *gin.Context) {
 	project := c.Param("projectName")
 	upstreamRepo := c.Query("upstreamRepo")
@@ -192,6 +214,19 @@ func ListUserForks(c *gin.Context) {
 
 // CreateUserFork handles POST /projects/:projectName/users/forks
 // Create a fork of the upstream umbrella repo for the user
+// @Summary      Create user fork
+// @Description  Creates a fork of an upstream GitHub repository for the authenticated user
+// @Tags         repositories
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        projectName  path      string                                 true  "Project name (Kubernetes namespace)"
+// @Param        request      body      object{upstreamRepo=string}            true  "Fork creation request with upstreamRepo"
+// @Success      202  {object}  map[string]string  "Fork creation requested"
+// @Failure      400  {object}  map[string]string  "Invalid request body or repository format"
+// @Failure      401  {object}  map[string]string  "Unauthorized - invalid or missing GitHub token"
+// @Failure      502  {object}  map[string]string  "GitHub request failed"
+// @Router       /projects/{projectName}/users/forks [post]
 func CreateUserFork(c *gin.Context) {
 	project := c.Param("projectName")
 
@@ -238,6 +273,20 @@ func CreateUserFork(c *gin.Context) {
 
 // GetRepoTree handles GET /projects/:projectName/repo/tree
 // Fetch repo tree entries via backend proxy (supports both GitHub and GitLab)
+// @Summary      Get repository tree
+// @Description  Fetches directory tree entries for a repository path (supports both GitHub and GitLab)
+// @Tags         repositories
+// @Security     BearerAuth
+// @Produce      json
+// @Param        projectName  path      string                 true   "Project name (Kubernetes namespace)"
+// @Param        repo         query     string                 true   "Repository URL or owner/repo"
+// @Param        ref          query     string                 true   "Git reference (branch, tag, or commit SHA)"
+// @Param        path         query     string                 false  "Path within repository (default: root)"
+// @Success      200  {object}  map[string]interface{}  "Tree entries with path and entries array"
+// @Failure      400  {object}  map[string]string       "Invalid request - missing required parameters or unsupported provider"
+// @Failure      401  {object}  map[string]string       "Unauthorized - invalid or missing token"
+// @Failure      502  {object}  map[string]string       "GitHub/GitLab request failed"
+// @Router       /projects/{projectName}/repo/tree [get]
 func GetRepoTree(c *gin.Context) {
 	project := c.Param("projectName")
 	repo := c.Query("repo")
@@ -375,6 +424,18 @@ func GetRepoTree(c *gin.Context) {
 
 // ListRepoBranches handles GET /projects/:projectName/repo/branches
 // List all branches in a repository (supports both GitHub and GitLab)
+// @Summary      List repository branches
+// @Description  Lists all branches in a repository (supports both GitHub and GitLab)
+// @Tags         repositories
+// @Security     BearerAuth
+// @Produce      json
+// @Param        projectName  path      string                 true  "Project name (Kubernetes namespace)"
+// @Param        repo         query     string                 true  "Repository URL or owner/repo"
+// @Success      200  {object}  map[string]interface{}  "List of branches with name field"
+// @Failure      400  {object}  map[string]string       "Invalid request - missing repo parameter or unsupported provider"
+// @Failure      401  {object}  map[string]string       "Unauthorized - invalid or missing token"
+// @Failure      502  {object}  map[string]string       "GitHub/GitLab request failed"
+// @Router       /projects/{projectName}/repo/branches [get]
 func ListRepoBranches(c *gin.Context) {
 	project := c.Param("projectName")
 	repo := c.Query("repo")
@@ -475,6 +536,20 @@ func ListRepoBranches(c *gin.Context) {
 
 // GetRepoBlob handles GET /projects/:projectName/repo/blob
 // Fetch blob (text) via backend proxy (supports both GitHub and GitLab)
+// @Summary      Get repository blob
+// @Description  Fetches file contents from a repository (supports both GitHub and GitLab, returns base64-decoded content)
+// @Tags         repositories
+// @Security     BearerAuth
+// @Produce      json
+// @Param        projectName  path      string                 true  "Project name (Kubernetes namespace)"
+// @Param        repo         query     string                 true  "Repository URL or owner/repo"
+// @Param        ref          query     string                 true  "Git reference (branch, tag, or commit SHA)"
+// @Param        path         query     string                 true  "Path to file within repository"
+// @Success      200  {object}  map[string]interface{}  "File content with encoding information"
+// @Failure      400  {object}  map[string]string       "Invalid request - missing required parameters or unsupported provider"
+// @Failure      401  {object}  map[string]string       "Unauthorized - invalid or missing token"
+// @Failure      502  {object}  map[string]string       "GitHub/GitLab request failed"
+// @Router       /projects/{projectName}/repo/blob [get]
 func GetRepoBlob(c *gin.Context) {
 	project := c.Param("projectName")
 	repo := c.Query("repo")
