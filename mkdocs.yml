@@ -49,6 +49,7 @@ nav:
   - Developer Guide:
     - Observability & Instrumentation: observability-langfuse.md
     - Model Pricing: model-pricing.md
+    - API Reference: api/index.md
   - Labs:
     - Overview: labs/index.md
     - Lab 1 - Your First Agentic Session: labs/basic/lab-1-first-rfe.md
@@ -67,6 +68,7 @@ nav:
 plugins:
   - search
   - mermaid2
+  - swagger-ui-tag
 
 markdown_extensions:
   - admonition

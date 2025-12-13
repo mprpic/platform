@@ -6,6 +6,7 @@ mkdocs-material>=9.4.0
 
 # Plugins
 mkdocs-mermaid2-plugin>=1.1.1
+mkdocs-swagger-ui-tag>=0.6.0
 
 # Markdown Extensions (included with mkdocs-material)
 pymdown-extensions>=10.0
