@@ -97,6 +97,20 @@ func signState(secret string, payload string) string {
 }
 
 // HandleGitHubUserOAuthCallback handles GET /auth/github/user/callback
+// @Summary      GitHub OAuth user callback
+// @Description  Handles OAuth callback from GitHub App installation, verifies user ownership, and links installation to user account
+// @Tags         authentication
+// @Produce      json
+// @Param        code             query     string  true   "OAuth authorization code from GitHub"
+// @Param        state            query     string  false  "HMAC-signed state parameter (user, timestamp, return_to, installation_id)"
+// @Param        installation_id  query     string  false  "GitHub App installation ID (required if state is absent)"
+// @Success      302  "Redirect to return_to URL or /integrations"
+// @Failure      400  {object}  map[string]string  "Invalid code, state, or installation_id"
+// @Failure      401  {object}  map[string]string  "User mismatch or missing user identity"
+// @Failure      403  {object}  map[string]string  "Installation not owned by user"
+// @Failure      500  {object}  map[string]string  "OAuth not configured"
+// @Failure      502  {object}  map[string]string  "OAuth exchange or verification failed"
+// @Router       /auth/github/user/callback [get]
 func HandleGitHubUserOAuthCallback(c *gin.Context) {
 	clientID := os.Getenv("GITHUB_CLIENT_ID")
 	clientSecret := os.Getenv("GITHUB_CLIENT_SECRET")
@@ -353,6 +367,17 @@ func deleteGitHubInstallation(ctx context.Context, userID string) error {
 
 // LinkGitHubInstallationGlobal handles POST /auth/github/install
 // Links the current SSO user to a GitHub App installation ID.
+// @Summary      Link GitHub App installation
+// @Description  Links authenticated user to a GitHub App installation ID, enriching with account login from GitHub API
+// @Tags         authentication
+// @Accept       json
+// @Produce      json
+// @Param        installation  body      object{installationId=int64}  true  "GitHub App installation ID"
+// @Success      200  {object}  map[string]interface{}  "Installation linked successfully with installationId"
+// @Failure      400  {object}  map[string]string       "Invalid request body"
+// @Failure      401  {object}  map[string]string       "Unauthorized - missing user identity"
+// @Failure      500  {object}  map[string]string       "Failed to store installation"
+// @Router       /auth/github/install [post]
 func LinkGitHubInstallationGlobal(c *gin.Context) {
 	userID, _ := c.Get("userID")
 	if userID == nil || strings.TrimSpace(userID.(string)) == "" {
@@ -401,6 +426,13 @@ func LinkGitHubInstallationGlobal(c *gin.Context) {
 }
 
 // GetGitHubStatusGlobal handles GET /auth/github/status
+// @Summary      Get GitHub installation status
+// @Description  Retrieves GitHub App installation status for authenticated user, including installation ID, host, and GitHub user ID
+// @Tags         authentication
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}  "Installation status (installed, installationId, host, githubUserId, userId, updatedAt)"
+// @Failure      401  {object}  map[string]string       "Unauthorized - missing user identity"
+// @Router       /auth/github/status [get]
 func GetGitHubStatusGlobal(c *gin.Context) {
 	userID, _ := c.Get("userID")
 	if userID == nil || strings.TrimSpace(userID.(string)) == "" {
@@ -423,6 +455,14 @@ func GetGitHubStatusGlobal(c *gin.Context) {
 }
 
 // DisconnectGitHubGlobal handles POST /auth/github/disconnect
+// @Summary      Disconnect GitHub account
+// @Description  Removes GitHub App installation mapping for authenticated user
+// @Tags         authentication
+// @Produce      json
+// @Success      200  {object}  map[string]string  "GitHub account disconnected"
+// @Failure      401  {object}  map[string]string  "Unauthorized - missing user identity"
+// @Failure      500  {object}  map[string]string  "Failed to unlink installation"
+// @Router       /auth/github/disconnect [post]
 func DisconnectGitHubGlobal(c *gin.Context) {
 	userID, _ := c.Get("userID")
 	if userID == nil || strings.TrimSpace(userID.(string)) == "" {
