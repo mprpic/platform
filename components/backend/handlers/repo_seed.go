@@ -220,6 +220,19 @@ func SeedRepository(ctx context.Context, repoPath, repoURL, branch, userEmail, u
 }
 
 // GetRepoSeedStatus handles GET /projects/:project/repo/seed-status
+// @Summary      Get repository seed status
+// @Description  Checks if a repository is missing required .claude/ directory structure and returns seeding status
+// @Tags         repositories
+// @Security     BearerAuth
+// @Produce      json
+// @Param        projectName  path   string  true   "Project name (Kubernetes namespace)"
+// @Param        repo         query  string  true   "Repository URL to check"
+// @Success      200  {object}  SeedingStatus       "Seeding status with missing directories and files"
+// @Failure      400  {object}  map[string]string  "Invalid request - repo parameter required"
+// @Failure      401  {object}  map[string]string  "Unauthorized - invalid or missing token"
+// @Failure      502  {object}  map[string]string  "Failed to clone repository"
+// @Failure      500  {object}  map[string]string  "Internal server error"
+// @Router       /projects/{projectName}/repo/seed-status [get]
 func GetRepoSeedStatus(c *gin.Context) {
 	project := c.Param("projectName")
 	repoURL := c.Query("repo")
@@ -292,6 +305,21 @@ func GetRepoSeedStatus(c *gin.Context) {
 }
 
 // SeedRepositoryEndpoint handles POST /projects/:project/repo/seed
+// @Summary      Seed repository with .claude/ structure
+// @Description  Creates .claude/ directory structure in repository, commits changes, and pushes to remote
+// @Tags         repositories
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        projectName  path      string       true  "Project name (Kubernetes namespace)"
+// @Param        seed         body      SeedRequest  true  "Seed configuration (repositoryUrl, branch, force)"
+// @Success      200  {object}  SeedResponse        "Seeding completed successfully with commit details"
+// @Failure      400  {object}  map[string]string  "Invalid request body or unsupported provider"
+// @Failure      401  {object}  map[string]string  "Unauthorized - invalid or missing token"
+// @Failure      403  {object}  map[string]string  "Forbidden - token lacks write access to repository"
+// @Failure      502  {object}  map[string]string  "Failed to clone or push to repository"
+// @Failure      500  {object}  map[string]string  "Internal server error"
+// @Router       /projects/{projectName}/repo/seed [post]
 func SeedRepositoryEndpoint(c *gin.Context) {
 	project := c.Param("projectName")
 
