@@ -296,6 +296,21 @@ func parseStatus(status map[string]interface{}) *types.AgenticSessionStatus {
 
 // V2 API Handlers - Multi-tenant session management
 
+// ListSessions handles GET /projects/:projectName/agentic-sessions
+// @Summary      List agentic sessions
+// @Description  Returns all agentic sessions in the project namespace that the authenticated user has access to
+// @Tags         sessions
+// @Security     BearerAuth
+// @Produce      json
+// @Param        projectName  path      string                     true   "Project name (Kubernetes namespace)"
+// @Param        limit        query     int                        false  "Number of items per page (default: 20, max: 100)"
+// @Param        offset       query     int                        false  "Offset for pagination (default: 0)"
+// @Param        search       query     string                     false  "Search filter (matches name, displayName, or prompt)"
+// @Success      200  {object}  types.PaginatedResponse  "Paginated list of sessions"
+// @Failure      400  {object}  map[string]string        "Invalid pagination parameters"
+// @Failure      401  {object}  map[string]string        "Unauthorized - invalid or missing token"
+// @Failure      500  {object}  map[string]string        "Internal server error"
+// @Router       /projects/{projectName}/agentic-sessions [get]
 func ListSessions(c *gin.Context) {
 	project := c.GetString("project")
 	reqK8s, reqDyn := GetK8sClientsForRequest(c)
@@ -443,6 +458,20 @@ func paginateSessions(sessions []types.AgenticSession, offset, limit int) ([]typ
 	return sessions[offset:end], hasMore, nextOffset
 }
 
+// CreateSession handles POST /projects/:projectName/agentic-sessions
+// @Summary      Create agentic session
+// @Description  Creates a new AgenticSession custom resource with AI agent configuration, multi-repo support, and user context
+// @Tags         sessions
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        projectName  path      string                              true  "Project name (Kubernetes namespace)"
+// @Param        session      body      types.CreateAgenticSessionRequest  true  "Session configuration"
+// @Success      201  {object}  map[string]interface{}  "Session created successfully with name and UID"
+// @Failure      400  {object}  map[string]string       "Invalid request body"
+// @Failure      401  {object}  map[string]string       "Unauthorized - invalid or missing token"
+// @Failure      500  {object}  map[string]string       "Internal server error"
+// @Router       /projects/{projectName}/agentic-sessions [post]
 func CreateSession(c *gin.Context) {
 	project := c.GetString("project")
 	// Get user-scoped clients for creating the AgenticSession (enforces user RBAC)
@@ -826,6 +855,19 @@ func provisionRunnerTokenForSession(c *gin.Context, reqK8s *kubernetes.Clientset
 	return nil
 }
 
+// GetSession handles GET /projects/:projectName/agentic-sessions/:sessionName
+// @Summary      Get agentic session
+// @Description  Retrieves detailed information about a specific agentic session including spec, status, and metadata
+// @Tags         sessions
+// @Security     BearerAuth
+// @Produce      json
+// @Param        projectName   path      string                     true  "Project name (Kubernetes namespace)"
+// @Param        sessionName   path      string                     true  "Session name"
+// @Success      200  {object}  types.AgenticSession  "Session details"
+// @Failure      401  {object}  map[string]string     "Unauthorized - invalid or missing token"
+// @Failure      404  {object}  map[string]string     "Session not found"
+// @Failure      500  {object}  map[string]string     "Internal server error"
+// @Router       /projects/{projectName}/agentic-sessions/{sessionName} [get]
 func GetSession(c *gin.Context) {
 	project := c.GetString("project")
 	sessionName := c.Param("sessionName")
@@ -862,8 +904,20 @@ func GetSession(c *gin.Context) {
 }
 
 // MintSessionGitHubToken validates the token via TokenReview, ensures SA matches CR annotation, and returns a short-lived GitHub token.
-// POST /api/projects/:projectName/agentic-sessions/:sessionName/github/token
-// Auth: Authorization: Bearer <BOT_TOKEN> (K8s SA token with audience "ambient-backend")
+// @Summary      Mint session GitHub token
+// @Description  Validates service account token and returns short-lived GitHub token for session repository operations
+// @Tags         sessions
+// @Security     BearerAuth
+// @Produce      json
+// @Param        projectName   path      string                 true  "Project name (Kubernetes namespace)"
+// @Param        sessionName   path      string                 true  "Session name"
+// @Success      200  {object}  map[string]string  "GitHub token with expiration"
+// @Failure      400  {object}  map[string]string  "Session missing user context"
+// @Failure      401  {object}  map[string]string  "Unauthorized - invalid or missing token"
+// @Failure      403  {object}  map[string]string  "Forbidden - service account not authorized for session"
+// @Failure      404  {object}  map[string]string  "Session not found"
+// @Failure      502  {object}  map[string]string  "Failed to retrieve GitHub token"
+// @Router       /projects/{projectName}/agentic-sessions/{sessionName}/github/token [post]
 func MintSessionGitHubToken(c *gin.Context) {
 	project := c.Param("projectName")
 	sessionName := c.Param("sessionName")
@@ -963,6 +1017,21 @@ func MintSessionGitHubToken(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"token": tokenStr})
 }
 
+// PatchSession handles PATCH /projects/:projectName/agentic-sessions/:sessionName
+// @Summary      Patch agentic session
+// @Description  Applies JSON patch to session metadata annotations (for partial updates)
+// @Tags         sessions
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        projectName   path      string                 true  "Project name (Kubernetes namespace)"
+// @Param        sessionName   path      string                 true  "Session name"
+// @Param        patch         body      map[string]interface{}  true  "JSON patch (typically metadata.annotations)"
+// @Success      200  {object}  map[string]interface{}  "Session patched successfully"
+// @Failure      400  {object}  map[string]string       "Invalid request body"
+// @Failure      404  {object}  map[string]string       "Session not found"
+// @Failure      500  {object}  map[string]string       "Internal server error"
+// @Router       /projects/{projectName}/agentic-sessions/{sessionName} [patch]
 func PatchSession(c *gin.Context) {
 	project := c.GetString("project")
 	sessionName := c.Param("sessionName")
@@ -1012,6 +1081,22 @@ func PatchSession(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Session patched successfully", "annotations": updated.GetAnnotations()})
 }
 
+// UpdateSession handles PUT /projects/:projectName/agentic-sessions/:sessionName
+// @Summary      Update agentic session
+// @Description  Updates session specification (prompt, displayName, LLM settings, timeout). Forbidden while session is Running or Creating.
+// @Tags         sessions
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        projectName   path      string                              true  "Project name (Kubernetes namespace)"
+// @Param        sessionName   path      string                              true  "Session name"
+// @Param        update        body      types.UpdateAgenticSessionRequest  true  "Updated session fields"
+// @Success      200  {object}  types.AgenticSession  "Updated session"
+// @Failure      400  {object}  map[string]string     "Invalid request body"
+// @Failure      404  {object}  map[string]string     "Session not found"
+// @Failure      409  {object}  map[string]string     "Conflict - cannot modify while Running/Creating"
+// @Failure      500  {object}  map[string]string     "Internal server error"
+// @Router       /projects/{projectName}/agentic-sessions/{sessionName} [put]
 func UpdateSession(c *gin.Context) {
 	project := c.GetString("project")
 	sessionName := c.Param("sessionName")
@@ -1114,7 +1199,22 @@ func UpdateSession(c *gin.Context) {
 }
 
 // UpdateSessionDisplayName updates only the spec.displayName field on the AgenticSession.
-// PUT /api/projects/:projectName/agentic-sessions/:sessionName/displayname
+// @Summary      Update session display name
+// @Description  Updates only the display name field (lighter-weight than full update)
+// @Tags         sessions
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        projectName   path      string                 true  "Project name (Kubernetes namespace)"
+// @Param        sessionName   path      string                 true  "Session name"
+// @Param        displayName   body      map[string]string      true  "Display name update (key: displayName)"
+// @Success      200  {object}  types.AgenticSession  "Updated session"
+// @Failure      400  {object}  map[string]string     "Invalid request body or display name validation failure"
+// @Failure      401  {object}  map[string]string     "Unauthorized - invalid or missing token"
+// @Failure      403  {object}  map[string]string     "Forbidden - insufficient permissions"
+// @Failure      404  {object}  map[string]string     "Session not found"
+// @Failure      500  {object}  map[string]string     "Internal server error"
+// @Router       /projects/{projectName}/agentic-sessions/{sessionName}/displayname [put]
 func UpdateSessionDisplayName(c *gin.Context) {
 	project := c.GetString("project")
 	sessionName := c.Param("sessionName")
@@ -1222,7 +1322,21 @@ func UpdateSessionDisplayName(c *gin.Context) {
 }
 
 // SelectWorkflow sets the active workflow for a session
-// POST /api/projects/:projectName/agentic-sessions/:sessionName/workflow
+// @Summary      Select active workflow
+// @Description  Sets the active workflow for an interactive session (git URL, branch, path)
+// @Tags         sessions
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        projectName   path      string                     true  "Project name (Kubernetes namespace)"
+// @Param        sessionName   path      string                     true  "Session name"
+// @Param        workflow      body      types.WorkflowSelection   true  "Workflow configuration (gitUrl, branch, path)"
+// @Success      200  {object}  map[string]interface{}  "Workflow updated successfully"
+// @Failure      400  {object}  map[string]string       "Invalid request body"
+// @Failure      404  {object}  map[string]string       "Session not found"
+// @Failure      409  {object}  map[string]string       "Session must be Running and interactive"
+// @Failure      500  {object}  map[string]string       "Internal server error"
+// @Router       /projects/{projectName}/agentic-sessions/{sessionName}/workflow [post]
 func SelectWorkflow(c *gin.Context) {
 	project := c.GetString("project")
 	sessionName := c.Param("sessionName")
@@ -1304,7 +1418,21 @@ func SelectWorkflow(c *gin.Context) {
 }
 
 // AddRepo adds a new repository to a running session
-// POST /api/projects/:projectName/agentic-sessions/:sessionName/repos
+// @Summary      Add repository to session
+// @Description  Dynamically adds a repository to a running interactive session
+// @Tags         sessions
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        projectName   path      string                     true  "Project name (Kubernetes namespace)"
+// @Param        sessionName   path      string                     true  "Session name"
+// @Param        repo          body      map[string]string          true  "Repository configuration (url, branch)"
+// @Success      200  {object}  map[string]interface{}  "Repository added successfully"
+// @Failure      400  {object}  map[string]string       "Invalid request body"
+// @Failure      404  {object}  map[string]string       "Session not found"
+// @Failure      409  {object}  map[string]string       "Session must be Running and interactive"
+// @Failure      500  {object}  map[string]string       "Internal server error"
+// @Router       /projects/{projectName}/agentic-sessions/{sessionName}/repos [post]
 func AddRepo(c *gin.Context) {
 	project := c.GetString("project")
 	sessionName := c.Param("sessionName")
@@ -1384,7 +1512,19 @@ func AddRepo(c *gin.Context) {
 }
 
 // RemoveRepo removes a repository from a running session
-// DELETE /api/projects/:projectName/agentic-sessions/:sessionName/repos/:repoName
+// @Summary      Remove repository from session
+// @Description  Dynamically removes a repository from a running interactive session
+// @Tags         sessions
+// @Security     BearerAuth
+// @Produce      json
+// @Param        projectName   path      string                     true  "Project name (Kubernetes namespace)"
+// @Param        sessionName   path      string                     true  "Session name"
+// @Param        repoName      path      string                     true  "Repository folder name (derived from URL)"
+// @Success      200  {object}  map[string]interface{}  "Repository removed successfully"
+// @Failure      404  {object}  map[string]string       "Session or repository not found"
+// @Failure      409  {object}  map[string]string       "Session must be Running and interactive"
+// @Failure      500  {object}  map[string]string       "Internal server error"
+// @Router       /projects/{projectName}/agentic-sessions/{sessionName}/repos/{repoName} [delete]
 func RemoveRepo(c *gin.Context) {
 	project := c.GetString("project")
 	sessionName := c.Param("sessionName")
@@ -1460,7 +1600,17 @@ func RemoveRepo(c *gin.Context) {
 }
 
 // GetWorkflowMetadata retrieves commands and agents metadata from the active workflow
-// GET /api/projects/:projectName/agentic-sessions/:sessionName/workflow/metadata
+// @Summary      Get workflow metadata
+// @Description  Retrieves commands and agents metadata from the active workflow via content service
+// @Tags         sessions
+// @Security     BearerAuth
+// @Produce      json
+// @Param        projectName   path      string                 true  "Project name (Kubernetes namespace)"
+// @Param        sessionName   path      string                 true  "Session name"
+// @Success      200  {object}  map[string]interface{}  "Workflow metadata (commands and agents)"
+// @Failure      400  {object}  map[string]string       "Invalid request - project namespace required"
+// @Failure      503  {object}  map[string]string       "Content service unavailable"
+// @Router       /projects/{projectName}/agentic-sessions/{sessionName}/workflow/metadata [get]
 func GetWorkflowMetadata(c *gin.Context) {
 	project := c.GetString("project")
 	if project == "" {
@@ -1604,8 +1754,14 @@ type OOTBWorkflow struct {
 }
 
 // ListOOTBWorkflows returns the list of out-of-the-box workflows dynamically discovered from GitHub
-// Attempts to use user's GitHub token for better rate limits, falls back to unauthenticated for public repos
-// GET /api/workflows/ootb?project=<projectName>
+// @Summary      List out-of-the-box workflows
+// @Description  Discovers available OOTB workflows from configured GitHub repository (ambient-code/ootb-ambient-workflows by default)
+// @Tags         workflows
+// @Produce      json
+// @Param        project  query  string  false  "Project name (optional, improves rate limits via user's GitHub token)"
+// @Success      200  {object}  map[string]interface{}  "List of available workflows"
+// @Failure      500  {object}  map[string]string       "Internal server error or failed to discover workflows"
+// @Router       /workflows/ootb [get]
 func ListOOTBWorkflows(c *gin.Context) {
 	// Try to get user's GitHub token (best effort - not required)
 	// This gives better rate limits (5000/hr vs 60/hr) and supports private repos
