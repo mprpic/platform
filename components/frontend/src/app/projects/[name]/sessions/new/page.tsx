@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Loader2 } from "lucide-react";
+import { Loader2, Sparkles } from "lucide-react";
 import { useForm, useFieldArray } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -20,6 +20,7 @@ import { RepositoryDialog } from "./repository-dialog";
 import { RepositoryList } from "./repository-list";
 import { ModelConfiguration } from "./model-configuration";
 import { useCreateSession } from "@/services/queries/use-sessions";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 const formSchema = z
   .object({
@@ -185,7 +186,56 @@ export default function NewProjectSessionPage({ params }: { params: Promise<{ na
                   name="initialPrompt"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Agentic Prompt</FormLabel>
+                      <div className="flex items-center justify-between">
+                        <FormLabel>Agentic Prompt</FormLabel>
+                        <Popover>
+                          <PopoverTrigger asChild>
+                            <Button type="button" variant="ghost" size="sm" className="h-8 gap-1">
+                              <Sparkles className="h-4 w-4" />
+                              Refine
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-96" align="end">
+                            <div className="space-y-3">
+                              <div>
+                                <h4 className="font-medium text-sm mb-2">Tips for Better Prompts</h4>
+                                <ul className="text-sm text-muted-foreground space-y-1 list-disc list-inside">
+                                  <li>Be specific about what you want to accomplish</li>
+                                  <li>Include relevant context and constraints</li>
+                                  <li>Mention specific files or patterns to focus on</li>
+                                  <li>Specify the desired output format</li>
+                                </ul>
+                              </div>
+                              <div>
+                                <h4 className="font-medium text-sm mb-2">Example Prompts</h4>
+                                <div className="space-y-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => form.setValue("initialPrompt", "Review the authentication code in src/auth/ and identify any security vulnerabilities. Focus on token handling and session management.")}
+                                    className="w-full text-left p-2 text-xs bg-muted hover:bg-muted/80 rounded border transition-colors"
+                                  >
+                                    Security review with specific focus area
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => form.setValue("initialPrompt", "Add unit tests for all functions in src/utils/helpers.ts. Ensure edge cases are covered and aim for 100% code coverage.")}
+                                    className="w-full text-left p-2 text-xs bg-muted hover:bg-muted/80 rounded border transition-colors"
+                                  >
+                                    Test coverage with clear goals
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => form.setValue("initialPrompt", "Refactor the API handlers in backend/handlers/ to reduce duplication. Extract common patterns into reusable utilities while maintaining backward compatibility.")}
+                                    className="w-full text-left p-2 text-xs bg-muted hover:bg-muted/80 rounded border transition-colors"
+                                  >
+                                    Refactoring with constraints
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          </PopoverContent>
+                        </Popover>
+                      </div>
                       <FormControl>
                         <Textarea placeholder="Describe what you want Claude to analyze on the website..." className="min-h-[100px]" {...field} />
                       </FormControl>
