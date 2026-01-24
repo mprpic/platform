@@ -70,15 +70,14 @@ class ClaudeCodeAdapter:
         self._skip_resume_on_restart = False
         self._turn_count = 0
 
-        # AG-UI streaming state
-        self._current_message_id: Optional[str] = None
-        self._current_tool_id: Optional[str] = None
+        # AG-UI streaming state (per-run, not instance state)
+        # NOTE: _current_message_id and _current_tool_id are now local variables
+        # in _run_claude_agent_sdk to avoid race conditions with concurrent runs
         self._current_run_id: Optional[str] = None
         self._current_thread_id: Optional[str] = None
         
-        # Active Claude SDK client for interrupt support
+        # Active client reference for interrupt support
         self._active_client: Optional[Any] = None
-        self._active_client_ctx: Optional[Any] = None
 
     async def initialize(self, context: RunnerContext):
         """Initialize the adapter with context."""
@@ -88,13 +87,11 @@ class ClaudeCodeAdapter:
         # Copy Google OAuth credentials from mounted Secret to writable workspace location
         await self._setup_google_credentials()
         
-        # Prepare workspace from input repo if provided
-        async for event in self._prepare_workspace():
-            yield event
-            
-        # Initialize workflow if ACTIVE_WORKFLOW env vars are set
-        async for event in self._initialize_workflow_if_set():
-            yield event
+        # Workspace is already prepared by init container (hydrate.sh)
+        # - Repos cloned to /workspace/repos/
+        # - Workflows cloned to /workspace/workflows/
+        # - State hydrated from S3 to .claude/, artifacts/, file-uploads/
+        logger.info("Workspace prepared by init container, validating...")
             
         # Validate prerequisite files exist for phase-based commands
         try:
@@ -116,6 +113,7 @@ class ClaudeCodeAdapter:
         
         Args:
             input_data: RunAgentInput with thread_id, run_id, messages, tools
+            app_state: Optional FastAPI app.state for persistent client storage/reuse
             
         Yields:
             AG-UI events (RunStartedEvent, TextMessageContentEvent, etc.)
@@ -125,6 +123,10 @@ class ClaudeCodeAdapter:
         
         self._current_thread_id = thread_id
         self._current_run_id = run_id
+        
+        # Check for newly available Google OAuth credentials (user may have authenticated mid-session)
+        # This picks up credentials after K8s syncs the mounted secret (~60s after OAuth completes)
+        await self.refresh_google_credentials()
         
         try:
             # Emit RUN_STARTED
@@ -278,8 +280,19 @@ class ClaudeCodeAdapter:
     async def _run_claude_agent_sdk(
         self, prompt: str, thread_id: str, run_id: str
     ) -> AsyncIterator[BaseEvent]:
-        """Execute the Claude Code SDK with the given prompt and yield AG-UI events."""
-        logger.info(f"_run_claude_agent_sdk called with prompt length={len(prompt)}")
+        """Execute the Claude Code SDK with the given prompt and yield AG-UI events.
+        
+        Creates a fresh client for each run - simpler and more reliable than client reuse.
+        
+        Args:
+            prompt: The user prompt to send to Claude
+            thread_id: AG-UI thread identifier
+            run_id: AG-UI run identifier
+        """
+        # Per-run state - NOT instance variables to avoid race conditions with concurrent runs
+        current_message_id: Optional[str] = None
+        
+        logger.info(f"_run_claude_agent_sdk called with prompt length={len(prompt)}, will create fresh client")
         try:
             # Check for authentication method
             logger.info("Checking authentication configuration...")
@@ -321,6 +334,7 @@ class ClaudeCodeAdapter:
                 ToolResultBlock,
             )
             from claude_agent_sdk.types import StreamEvent
+            from claude_agent_sdk import tool as sdk_tool, create_sdk_mcp_server
 
             from observability import ObservabilityManager
 
@@ -349,9 +363,11 @@ class ClaudeCodeAdapter:
             )
             obs._pending_initial_prompt = prompt
 
-            # Check if continuing from previous session
-            parent_session_id = self.context.get_env('PARENT_SESSION_ID', '').strip()
-            is_continuation = bool(parent_session_id)
+            # Check if this is a resume session via IS_RESUME env var
+            # This is set by the operator when restarting a stopped/completed/failed session
+            is_continuation = self.context.get_env('IS_RESUME', '').strip().lower() == 'true'
+            if is_continuation:
+                logger.info("IS_RESUME=true - treating as continuation")
 
             # Determine cwd and additional dirs
             repos_cfg = self._get_repos_config()
@@ -386,9 +402,36 @@ class ClaudeCodeAdapter:
             logger.info(f"Claude SDK CWD: {cwd_path}")
             logger.info(f"Claude SDK additional directories: {add_dirs}")
 
-            # Load MCP server configuration
-            mcp_servers = self._load_mcp_config(cwd_path)
-            allowed_tools = ["Read", "Write", "Bash", "Glob", "Grep", "Edit", "MultiEdit", "WebSearch", "WebFetch"]
+            # Load MCP server configuration (webfetch is included in static .mcp.json)
+            mcp_servers = self._load_mcp_config(cwd_path) or {}
+            
+            # Create custom session control tools
+            # Capture self reference for the restart tool closure
+            adapter_ref = self
+            
+            @sdk_tool("restart_session", "Restart the Claude session to recover from issues, clear state, or get a fresh connection. Use this if you detect you're in a broken state or need to reset.", {})
+            async def restart_session_tool(args: dict) -> dict:
+                """Tool that allows Claude to request a session restart."""
+                adapter_ref._restart_requested = True
+                logger.info("🔄 Session restart requested by Claude via MCP tool")
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": "Session restart has been requested. The current run will complete and a fresh session will be established. Your conversation context will be preserved on disk."
+                    }]
+                }
+            
+            # Create SDK MCP server for session tools
+            session_tools_server = create_sdk_mcp_server(
+                name="session",
+                version="1.0.0",
+                tools=[restart_session_tool]
+            )
+            mcp_servers["session"] = session_tools_server
+            logger.info("Added custom session control MCP tools (restart_session)")
+            
+            # Disable built-in WebFetch in favor of WebFetch.MCP from config
+            allowed_tools = ["Read", "Write", "Bash", "Glob", "Grep", "Edit", "MultiEdit", "WebSearch"]
             if mcp_servers:
                 for server_name in mcp_servers.keys():
                     allowed_tools.append(f"mcp__{server_name}")
@@ -413,20 +456,6 @@ class ClaudeCodeAdapter:
                 system_prompt=system_prompt_config,
                 include_partial_messages=True,
             )
-
-            # Enable continue_conversation for session resumption
-            if not self._first_run or is_continuation:
-                try:
-                    options.continue_conversation = True
-                    logger.info("Enabled continue_conversation for session resumption")
-                    yield RawEvent(
-                        type=EventType.RAW,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        event={"type": "system_log", "message": "🔄 Continuing conversation from previous state"}
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to set continue_conversation: {e}")
 
             if self._skip_resume_on_restart:
                 self._skip_resume_on_restart = False
@@ -467,13 +496,30 @@ class ClaudeCodeAdapter:
                     opts.continue_conversation = False
                 return ClaudeSDKClient(options=opts)
 
-            # Create SDK client with retry logic
+            # Create fresh client for each run
+            # (Python SDK has issues with client reuse despite docs suggesting it should work)
+            logger.info("Creating new ClaudeSDKClient for this run...")
+            
+            # Enable continue_conversation to resume from disk state
+            if not self._first_run or is_continuation:
+                try:
+                    options.continue_conversation = True
+                    logger.info("Enabled continue_conversation (will resume from disk state)")
+                    yield RawEvent(
+                        type=EventType.RAW,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        event={"type": "system_log", "message": "🔄 Resuming conversation from disk state"}
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to set continue_conversation: {e}")
+            
             try:
-                logger.info("Creating ClaudeSDKClient context manager...")
-                client_ctx = create_sdk_client(options)
-                logger.info("Entering ClaudeSDKClient context (initializing subprocess)...")
-                client = await client_ctx.__aenter__()
-                logger.info("ClaudeSDKClient initialized successfully!")
+                logger.info("Creating ClaudeSDKClient...")
+                client = create_sdk_client(options)
+                logger.info("Connecting ClaudeSDKClient (initializing subprocess)...")
+                await client.connect()
+                logger.info("ClaudeSDKClient connected successfully!")
             except Exception as resume_error:
                 error_str = str(resume_error).lower()
                 if "no conversation found" in error_str or "session" in error_str:
@@ -484,24 +530,14 @@ class ClaudeCodeAdapter:
                         run_id=run_id,
                         event={"type": "system_log", "message": "⚠️ Could not continue conversation, starting fresh..."}
                     )
-                    client_ctx = create_sdk_client(options, disable_continue=True)
-                    client = await client_ctx.__aenter__()
+                    client = create_sdk_client(options, disable_continue=True)
+                    await client.connect()
                 else:
                     raise
 
-            # Store active client for interrupt support
-            self._active_client = client
-            self._active_client_ctx = client_ctx
-
             try:
-                if not self._first_run:
-                    yield RawEvent(
-                        type=EventType.RAW,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        event={"type": "system_log", "message": "✅ Continuing conversation"}
-                    )
-                    logger.info("SDK continuing conversation from local state")
+                # Store client reference for interrupt support
+                self._active_client = client
 
                 # Process the prompt
                 step_id = str(uuid.uuid4())
@@ -518,8 +554,12 @@ class ClaudeCodeAdapter:
                 logger.info("Query sent, waiting for response stream...")
 
                 # Process response stream
+                logger.info("Starting to consume receive_response() iterator...")
+                message_count = 0
+                
                 async for message in client.receive_response():
-                    logger.info(f"[ClaudeSDKClient]: {message}")
+                    message_count += 1
+                    logger.info(f"[ClaudeSDKClient Message #{message_count}]: {message}")
 
                     # Handle StreamEvent for real-time streaming chunks
                     if isinstance(message, StreamEvent):
@@ -527,12 +567,12 @@ class ClaudeCodeAdapter:
                         event_type = event_data.get('type')
 
                         if event_type == 'message_start':
-                            self._current_message_id = str(uuid.uuid4())
+                            current_message_id = str(uuid.uuid4())
                             yield TextMessageStartEvent(
                                 type=EventType.TEXT_MESSAGE_START,
                                 thread_id=thread_id,
                                 run_id=run_id,
-                                message_id=self._current_message_id,
+                                message_id=current_message_id,
                                 role="assistant",
                             )
 
@@ -540,12 +580,12 @@ class ClaudeCodeAdapter:
                             delta_data = event_data.get('delta', {})
                             if delta_data.get('type') == 'text_delta':
                                 text_chunk = delta_data.get('text', '')
-                                if text_chunk:
+                                if text_chunk and current_message_id:
                                     yield TextMessageContentEvent(
                                         type=EventType.TEXT_MESSAGE_CONTENT,
                                         thread_id=thread_id,
                                         run_id=run_id,
-                                        message_id=self._current_message_id,
+                                        message_id=current_message_id,
                                         delta=text_chunk,
                                     )
                         continue
@@ -560,6 +600,20 @@ class ClaudeCodeAdapter:
                         if isinstance(message, AssistantMessage):
                             current_message = message
                             obs.start_turn(configured_model, user_input=prompt)
+                            
+                            # Emit trace_id for feedback association
+                            # Frontend can use this to link feedback to specific Langfuse traces
+                            trace_id = obs.get_current_trace_id()
+                            if trace_id:
+                                yield RawEvent(
+                                    type=EventType.RAW,
+                                    thread_id=thread_id,
+                                    run_id=run_id,
+                                    event={
+                                        "type": "langfuse_trace",
+                                        "traceId": trace_id,
+                                    }
+                                )
 
                         # Process all blocks in the message
                         for block in getattr(message, 'content', []) or []:
@@ -639,14 +693,14 @@ class ClaudeCodeAdapter:
                                 )
 
                         # End text message after processing all blocks
-                        if getattr(message, 'content', []) and self._current_message_id:
+                        if getattr(message, 'content', []) and current_message_id:
                             yield TextMessageEndEvent(
                                 type=EventType.TEXT_MESSAGE_END,
                                 thread_id=thread_id,
                                 run_id=run_id,
-                                message_id=self._current_message_id,
+                                message_id=current_message_id,
                             )
-                            self._current_message_id = None
+                            current_message_id = None
 
                     elif isinstance(message, SystemMessage):
                         text = getattr(message, 'text', None)
@@ -709,24 +763,40 @@ class ClaudeCodeAdapter:
                     step_id=step_id,
                     step_name="processing_prompt",
                 )
+                
+                logger.info(f"Response iterator fully consumed ({message_count} messages total)")
 
                 # Mark first run complete
                 self._first_run = False
+                
+                # Check if restart was requested by Claude
+                if self._restart_requested:
+                    logger.info("🔄 Restart was requested, emitting restart event")
+                    self._restart_requested = False  # Reset flag
+                    yield RawEvent(
+                        type=EventType.RAW,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        event={
+                            "type": "session_restart_requested",
+                            "message": "Claude requested a session restart. Reconnecting..."
+                        }
+                    )
 
             finally:
-                await client_ctx.__aexit__(None, None, None)
                 # Clear active client reference
                 self._active_client = None
-                self._active_client_ctx = None
-
+                
+                # Always disconnect client at end of run
+                if client is not None:
+                    logger.info("Disconnecting client (end of run)")
+                    await client.disconnect()
+            
             # Finalize observability
             await obs.finalize()
 
         except Exception as e:
             logger.error(f"Failed to run Claude Code SDK: {e}")
-            # Clear active client on error
-            self._active_client = None
-            self._active_client_ctx = None
             if 'obs' in locals():
                 await obs.cleanup_on_error(e)
             raise
@@ -734,14 +804,11 @@ class ClaudeCodeAdapter:
     async def interrupt(self) -> None:
         """
         Interrupt the active Claude SDK execution.
-        
-        Sends interrupt signal to stop Claude mid-execution.
-        See: https://platform.claude.com/docs/en/agent-sdk/python#methods
         """
-        if not self._active_client:
+        if self._active_client is None:
             logger.warning("Interrupt requested but no active client")
             return
-        
+            
         try:
             logger.info("Sending interrupt signal to Claude SDK client...")
             await self._active_client.interrupt()
@@ -779,11 +846,12 @@ class ClaudeCodeAdapter:
             logger.warning(f"Failed to derive workflow name: {e}, using default")
             cwd_path = str(Path(self.context.workspace_path) / "workflows" / "default")
 
-        # Add all repos as additional directories
+        # Add all repos as additional directories (repos are in /workspace/repos/{name})
+        repos_base = Path(self.context.workspace_path) / "repos"
         for r in repos_cfg:
             name = (r.get('name') or '').strip()
             if name:
-                repo_path = str(Path(self.context.workspace_path) / name)
+                repo_path = str(repos_base / name)
                 if repo_path not in add_dirs:
                     add_dirs.append(repo_path)
 
@@ -799,8 +867,14 @@ class ClaudeCodeAdapter:
         return cwd_path, add_dirs, derived_name
 
     def _setup_multi_repo_paths(self, repos_cfg: list) -> tuple[str, list]:
-        """Setup paths for multi-repo mode."""
+        """Setup paths for multi-repo mode.
+        
+        Repos are cloned to /workspace/repos/{name} by both:
+        - hydrate.sh (init container)
+        - clone_repo_at_runtime() (runtime addition)
+        """
         add_dirs = []
+        repos_base = Path(self.context.workspace_path) / "repos"
         
         main_name = (os.getenv('MAIN_REPO_NAME') or '').strip()
         if not main_name:
@@ -813,13 +887,15 @@ class ClaudeCodeAdapter:
                 idx_val = 0
             main_name = (repos_cfg[idx_val].get('name') or '').strip()
 
-        cwd_path = str(Path(self.context.workspace_path) / main_name) if main_name else self.context.workspace_path
+        # Main repo path is /workspace/repos/{name}
+        cwd_path = str(repos_base / main_name) if main_name else self.context.workspace_path
 
         for r in repos_cfg:
             name = (r.get('name') or '').strip()
             if not name:
                 continue
-            p = str(Path(self.context.workspace_path) / name)
+            # All repos are in /workspace/repos/{name}
+            p = str(repos_base / name)
             if p != cwd_path:
                 add_dirs.append(p)
 
@@ -887,160 +963,34 @@ class ClaudeCodeAdapter:
         }
 
     async def _prepare_workspace(self) -> AsyncIterator[BaseEvent]:
-        """Clone input repo/branch into workspace and configure git remotes."""
+        """Validate workspace prepared by init container.
+        
+        The init-hydrate container now handles:
+        - Downloading state from S3 (.claude/, artifacts/, file-uploads/)
+        - Cloning repos to /workspace/repos/
+        - Cloning workflows to /workspace/workflows/
+        
+        Runner just validates and logs what's ready.
+        """
         workspace = Path(self.context.workspace_path)
-        workspace.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Validating workspace at {workspace}")
+        
+        # Check what was hydrated
+        hydrated_paths = []
+        for path_name in [".claude", "artifacts", "file-uploads"]:
+            path_dir = workspace / path_name
+            if path_dir.exists():
+                file_count = len([f for f in path_dir.rglob("*") if f.is_file()])
+                if file_count > 0:
+                    hydrated_paths.append(f"{path_name} ({file_count} files)")
+        
+        if hydrated_paths:
+            logger.info(f"Hydrated from S3: {', '.join(hydrated_paths)}")
+        else:
+            logger.info("No state hydrated (fresh session)")
+        
+        # No further preparation needed - init container did the work
 
-        parent_session_id = self.context.get_env('PARENT_SESSION_ID', '').strip()
-        reusing_workspace = bool(parent_session_id)
-
-        logger.info(f"Workspace preparation: parent_session_id={parent_session_id[:8] if parent_session_id else 'None'}, reusing={reusing_workspace}")
-
-        repos_cfg = self._get_repos_config()
-        if repos_cfg:
-            async for event in self._prepare_multi_repo_workspace(workspace, repos_cfg, reusing_workspace):
-                yield event
-            return
-
-        # Single-repo legacy flow
-        input_repo = os.getenv("INPUT_REPO_URL", "").strip()
-        if not input_repo:
-            logger.info("No INPUT_REPO_URL configured, skipping single-repo setup")
-            return
-
-        input_branch = os.getenv("INPUT_BRANCH", "").strip() or "main"
-        output_repo = os.getenv("OUTPUT_REPO_URL", "").strip()
-
-        token = await self._fetch_token_for_url(input_repo)
-        workspace_has_git = (workspace / ".git").exists()
-
-        try:
-            if not workspace_has_git:
-                yield RawEvent(
-                    type=EventType.RAW,
-                    thread_id=self._current_thread_id or self.context.session_id,
-                    run_id=self._current_run_id or "init",
-                    event={"type": "system_log", "message": "📥 Cloning input repository..."}
-                )
-                clone_url = self._url_with_token(input_repo, token) if token else input_repo
-                await self._run_cmd(["git", "clone", "--branch", input_branch, "--single-branch", clone_url, str(workspace)], cwd=str(workspace.parent))
-                await self._run_cmd(["git", "remote", "set-url", "origin", clone_url], cwd=str(workspace), ignore_errors=True)
-            elif reusing_workspace:
-                yield RawEvent(
-                    type=EventType.RAW,
-                    thread_id=self._current_thread_id or self.context.session_id,
-                    run_id=self._current_run_id or "init",
-                    event={"type": "system_log", "message": "✓ Preserving workspace (continuation)"}
-                )
-                await self._run_cmd(["git", "remote", "set-url", "origin", self._url_with_token(input_repo, token) if token else input_repo], cwd=str(workspace), ignore_errors=True)
-            else:
-                yield RawEvent(
-                    type=EventType.RAW,
-                    thread_id=self._current_thread_id or self.context.session_id,
-                    run_id=self._current_run_id or "init",
-                    event={"type": "system_log", "message": "🔄 Resetting workspace to clean state"}
-                )
-                await self._run_cmd(["git", "remote", "set-url", "origin", self._url_with_token(input_repo, token) if token else input_repo], cwd=str(workspace))
-                await self._run_cmd(["git", "fetch", "origin", input_branch], cwd=str(workspace))
-                await self._run_cmd(["git", "checkout", input_branch], cwd=str(workspace))
-                await self._run_cmd(["git", "reset", "--hard", f"origin/{input_branch}"], cwd=str(workspace))
-
-            # Git identity
-            user_name = os.getenv("GIT_USER_NAME", "").strip() or "Ambient Code Bot"
-            user_email = os.getenv("GIT_USER_EMAIL", "").strip() or "bot@ambient-code.local"
-            await self._run_cmd(["git", "config", "user.name", user_name], cwd=str(workspace))
-            await self._run_cmd(["git", "config", "user.email", user_email], cwd=str(workspace))
-
-            if output_repo:
-                out_url = self._url_with_token(output_repo, token) if token else output_repo
-                await self._run_cmd(["git", "remote", "remove", "output"], cwd=str(workspace), ignore_errors=True)
-                await self._run_cmd(["git", "remote", "add", "output", out_url], cwd=str(workspace))
-
-        except Exception as e:
-            logger.error(f"Failed to prepare workspace: {e}")
-            yield RawEvent(
-                type=EventType.RAW,
-                thread_id=self._current_thread_id or self.context.session_id,
-                run_id=self._current_run_id or "init",
-                event={"type": "system_log", "message": f"Workspace preparation failed: {e}"}
-            )
-
-        # Create artifacts directory
-        try:
-            artifacts_dir = workspace / "artifacts"
-            artifacts_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            logger.warning(f"Failed to create artifacts directory: {e}")
-
-    async def _prepare_multi_repo_workspace(
-        self, workspace: Path, repos_cfg: list, reusing_workspace: bool
-    ) -> AsyncIterator[BaseEvent]:
-        """Prepare workspace for multi-repo mode."""
-        try:
-            for r in repos_cfg:
-                name = (r.get('name') or '').strip()
-                inp = r.get('input') or {}
-                url = (inp.get('url') or '').strip()
-                branch = (inp.get('branch') or '').strip() or 'main'
-                if not name or not url:
-                    continue
-
-                repo_dir = workspace / name
-                token = await self._fetch_token_for_url(url)
-                repo_exists = repo_dir.exists() and (repo_dir / ".git").exists()
-
-                if not repo_exists:
-                    yield RawEvent(
-                        type=EventType.RAW,
-                        thread_id=self._current_thread_id or self.context.session_id,
-                        run_id=self._current_run_id or "init",
-                        event={"type": "system_log", "message": f"📥 Cloning {name}..."}
-                    )
-                    clone_url = self._url_with_token(url, token) if token else url
-                    await self._run_cmd(["git", "clone", "--branch", branch, "--single-branch", clone_url, str(repo_dir)], cwd=str(workspace))
-                    await self._run_cmd(["git", "remote", "set-url", "origin", clone_url], cwd=str(repo_dir), ignore_errors=True)
-                elif reusing_workspace:
-                    yield RawEvent(
-                        type=EventType.RAW,
-                        thread_id=self._current_thread_id or self.context.session_id,
-                        run_id=self._current_run_id or "init",
-                        event={"type": "system_log", "message": f"✓ Preserving {name} (continuation)"}
-                    )
-                    await self._run_cmd(["git", "remote", "set-url", "origin", self._url_with_token(url, token) if token else url], cwd=str(repo_dir), ignore_errors=True)
-                else:
-                    yield RawEvent(
-                        type=EventType.RAW,
-                        thread_id=self._current_thread_id or self.context.session_id,
-                        run_id=self._current_run_id or "init",
-                        event={"type": "system_log", "message": f"🔄 Resetting {name} to clean state"}
-                    )
-                    await self._run_cmd(["git", "remote", "set-url", "origin", self._url_with_token(url, token) if token else url], cwd=str(repo_dir), ignore_errors=True)
-                    await self._run_cmd(["git", "fetch", "origin", branch], cwd=str(repo_dir))
-                    await self._run_cmd(["git", "checkout", branch], cwd=str(repo_dir))
-                    await self._run_cmd(["git", "reset", "--hard", f"origin/{branch}"], cwd=str(repo_dir))
-
-                # Git identity
-                user_name = os.getenv("GIT_USER_NAME", "").strip() or "Ambient Code Bot"
-                user_email = os.getenv("GIT_USER_EMAIL", "").strip() or "bot@ambient-code.local"
-                await self._run_cmd(["git", "config", "user.name", user_name], cwd=str(repo_dir))
-                await self._run_cmd(["git", "config", "user.email", user_email], cwd=str(repo_dir))
-
-                # Configure output remote
-                out = r.get('output') or {}
-                out_url_raw = (out.get('url') or '').strip()
-                if out_url_raw:
-                    out_url = self._url_with_token(out_url_raw, token) if token else out_url_raw
-                    await self._run_cmd(["git", "remote", "remove", "output"], cwd=str(repo_dir), ignore_errors=True)
-                    await self._run_cmd(["git", "remote", "add", "output", out_url], cwd=str(repo_dir))
-
-        except Exception as e:
-            logger.error(f"Failed to prepare multi-repo workspace: {e}")
-            yield RawEvent(
-                type=EventType.RAW,
-                thread_id=self._current_thread_id or self.context.session_id,
-                run_id=self._current_run_id or "init",
-                event={"type": "system_log", "message": f"Workspace preparation failed: {e}"}
-            )
 
     async def _validate_prerequisites(self):
         """Validate prerequisite files exist for phase-based slash commands."""
@@ -1075,13 +1025,10 @@ class ClaudeCodeAdapter:
                 break
 
     async def _initialize_workflow_if_set(self) -> AsyncIterator[BaseEvent]:
-        """Initialize workflow on startup if ACTIVE_WORKFLOW env vars are set."""
+        """Validate workflow was cloned by init container."""
         active_workflow_url = (os.getenv('ACTIVE_WORKFLOW_GIT_URL') or '').strip()
         if not active_workflow_url:
             return
-
-        active_workflow_branch = (os.getenv('ACTIVE_WORKFLOW_BRANCH') or 'main').strip()
-        active_workflow_path = (os.getenv('ACTIVE_WORKFLOW_PATH') or '').strip()
 
         try:
             owner, repo, _ = self._parse_owner_repo(active_workflow_url)
@@ -1094,79 +1041,24 @@ class ClaudeCodeAdapter:
             derived_name = (derived_name or '').removesuffix('.git').strip()
 
             if not derived_name:
-                logger.warning("Could not derive workflow name from URL, skipping initialization")
+                logger.warning("Could not derive workflow name from URL")
                 return
 
-            workflow_dir = Path(self.context.workspace_path) / "workflows" / derived_name
-
-            if workflow_dir.exists():
-                logger.info(f"Workflow {derived_name} already exists, skipping initialization")
-                return
-
-            logger.info(f"Initializing workflow {derived_name} from CR spec on startup")
-            async for event in self._clone_workflow_repository(active_workflow_url, active_workflow_branch, active_workflow_path, derived_name):
-                yield event
+            # Check for cloned workflow (init container uses -clone-temp suffix)
+            workspace = Path(self.context.workspace_path)
+            workflow_temp_dir = workspace / "workflows" / f"{derived_name}-clone-temp"
+            workflow_dir = workspace / "workflows" / derived_name
+            
+            if workflow_temp_dir.exists():
+                logger.info(f"Workflow {derived_name} cloned by init container at {workflow_temp_dir.name}")
+            elif workflow_dir.exists():
+                logger.info(f"Workflow {derived_name} available at {workflow_dir.name}")
+            else:
+                logger.warning(f"Workflow {derived_name} not found (init container may have failed to clone)")
 
         except Exception as e:
-            logger.error(f"Failed to initialize workflow on startup: {e}")
+            logger.error(f"Failed to validate workflow: {e}")
 
-    async def _clone_workflow_repository(
-        self, git_url: str, branch: str, path: str, workflow_name: str
-    ) -> AsyncIterator[BaseEvent]:
-        """Clone workflow repository."""
-        workspace = Path(self.context.workspace_path)
-        workflow_dir = workspace / "workflows" / workflow_name
-        temp_clone_dir = workspace / "workflows" / f"{workflow_name}-clone-temp"
-
-        if workflow_dir.exists():
-            yield RawEvent(
-                type=EventType.RAW,
-                thread_id=self._current_thread_id or self.context.session_id,
-                run_id=self._current_run_id or "init",
-                event={"type": "system_log", "message": f"✓ Workflow {workflow_name} already loaded"}
-            )
-            return
-
-        token = await self._fetch_token_for_url(git_url)
-
-        yield RawEvent(
-            type=EventType.RAW,
-            thread_id=self._current_thread_id or self.context.session_id,
-            run_id=self._current_run_id or "init",
-            event={"type": "system_log", "message": f"📥 Cloning workflow {workflow_name}..."}
-        )
-
-        clone_url = self._url_with_token(git_url, token) if token else git_url
-        await self._run_cmd(["git", "clone", "--branch", branch, "--single-branch", clone_url, str(temp_clone_dir)], cwd=str(workspace))
-
-        if path and path.strip():
-            subdir_path = temp_clone_dir / path.strip()
-            if subdir_path.exists() and subdir_path.is_dir():
-                shutil.copytree(subdir_path, workflow_dir)
-                shutil.rmtree(temp_clone_dir)
-                yield RawEvent(
-                    type=EventType.RAW,
-                    thread_id=self._current_thread_id or self.context.session_id,
-                    run_id=self._current_run_id or "init",
-                    event={"type": "system_log", "message": f"✓ Extracted workflow from: {path}"}
-                )
-            else:
-                temp_clone_dir.rename(workflow_dir)
-                yield RawEvent(
-                    type=EventType.RAW,
-                    thread_id=self._current_thread_id or self.context.session_id,
-                    run_id=self._current_run_id or "init",
-                    event={"type": "system_log", "message": f"⚠️ Path '{path}' not found, using full repository"}
-                )
-        else:
-            temp_clone_dir.rename(workflow_dir)
-
-        yield RawEvent(
-            type=EventType.RAW,
-            thread_id=self._current_thread_id or self.context.session_id,
-            run_id=self._current_run_id or "init",
-            event={"type": "system_log", "message": f"✅ Workflow {workflow_name} ready"}
-        )
 
     async def _run_cmd(self, cmd, cwd=None, capture_stdout=False, ignore_errors=False):
         """Run a subprocess command asynchronously."""
@@ -1338,7 +1230,11 @@ class ClaudeCodeAdapter:
         return "", "", host
 
     def _get_repos_config(self) -> list[dict]:
-        """Read repos mapping from REPOS_JSON env if present."""
+        """Read repos mapping from REPOS_JSON env if present.
+
+        Expected format: [{"url": "...", "branch": "main", "autoPush": true}, ...]
+        Returns: [{"name": "repo-name", "url": "...", "branch": "...", "autoPush": bool}, ...]
+        """
         try:
             raw = os.getenv('REPOS_JSON', '').strip()
             if not raw:
@@ -1349,11 +1245,27 @@ class ClaudeCodeAdapter:
                 for it in data:
                     if not isinstance(it, dict):
                         continue
+
+                    # Extract simple format fields
+                    url = str(it.get('url') or '').strip()
+                    # Auto-generate branch from session name if not provided
+                    branch_from_json = it.get('branch')
+                    if branch_from_json and str(branch_from_json).strip():
+                        branch = str(branch_from_json).strip()
+                    else:
+                        # Fallback: use AGENTIC_SESSION_NAME to match backend logic
+                        session_id = os.getenv('AGENTIC_SESSION_NAME', '').strip()
+                        branch = f"ambient/{session_id}" if session_id else 'main'
+                    # Parse autoPush as boolean, defaulting to False for invalid types
+                    auto_push_raw = it.get('autoPush', False)
+                    auto_push = auto_push_raw if isinstance(auto_push_raw, bool) else False
+
+                    if not url:
+                        continue
+
+                    # Derive repo name from URL if not provided
                     name = str(it.get('name') or '').strip()
-                    input_obj = it.get('input') or {}
-                    output_obj = it.get('output') or None
-                    url = str((input_obj or {}).get('url') or '').strip()
-                    if not name and url:
+                    if not name:
                         try:
                             owner, repo, _ = self._parse_owner_repo(url)
                             derived = repo or ''
@@ -1365,8 +1277,14 @@ class ClaudeCodeAdapter:
                             name = (derived or '').removesuffix('.git').strip()
                         except Exception:
                             name = ''
-                    if name and isinstance(input_obj, dict) and url:
-                        out.append({'name': name, 'input': input_obj, 'output': output_obj})
+
+                    if name and url:
+                        out.append({
+                            'name': name,
+                            'url': url,
+                            'branch': branch,
+                            'autoPush': auto_push
+                        })
                 return out
         except Exception:
             return []
@@ -1415,58 +1333,105 @@ class ClaudeCodeAdapter:
             return {}
 
     def _build_workspace_context_prompt(self, repos_cfg, workflow_name, artifacts_path, ambient_config):
-        """Generate comprehensive system prompt describing workspace layout."""
-        prompt = "You are Claude Code working in a structured development workspace.\n\n"
+        """Generate concise system prompt describing workspace layout."""
+        prompt = "# Workspace Structure\n\n"
 
+        # Workflow directory (if active)
         if workflow_name:
-            prompt += "## Current Workflow\n"
-            prompt += f"Working directory: workflows/{workflow_name}/\n"
-            prompt += "This directory contains workflow logic and automation scripts.\n\n"
+            prompt += f"**Working Directory**: workflows/{workflow_name}/ (workflow logic - do not create files here)\n\n"
 
-        prompt += "## User-Uploaded Files (IMPORTANT)\n"
-        prompt += "Location: file-uploads/\n"
-        prompt += "Purpose: User-uploaded context files (screenshots, documents, images, PDFs, specs, designs).\n"
-        prompt += "ALWAYS check this directory when starting a new task - it often contains critical context.\n\n"
+        # Artifacts
+        prompt += f"**Artifacts**: {artifacts_path} (create all output files here)\n\n"
 
+        # Uploaded files
         file_uploads_path = Path(self.context.workspace_path) / "file-uploads"
         if file_uploads_path.exists() and file_uploads_path.is_dir():
             try:
                 files = sorted([f.name for f in file_uploads_path.iterdir() if f.is_file()])
                 if files:
-                    prompt += f"Currently uploaded files ({len(files)}):\n"
-                    for filename in files:
-                        prompt += f"  - {filename}\n"
-                    prompt += "READ THESE FILES if they're relevant to the user's task!\n"
+                    max_display = 10
+                    if len(files) <= max_display:
+                        prompt += f"**Uploaded Files**: {', '.join(files)}\n\n"
+                    else:
+                        prompt += f"**Uploaded Files** ({len(files)} total): {', '.join(files[:max_display])}, and {len(files) - max_display} more\n\n"
             except Exception:
                 pass
+        else:
+            prompt += "**Uploaded Files**: None\n\n"
 
-        prompt += "\n## Shared Artifacts Directory\n"
-        prompt += f"Location: {artifacts_path}\n"
-        prompt += "Purpose: Create all output artifacts (documents, specs, reports) here.\n\n"
-
+        # Repositories
         if repos_cfg:
-            prompt += "## Available Code Repositories\n"
-            for i, repo in enumerate(repos_cfg):
-                name = repo.get('name', f'repo-{i}')
-                prompt += f"- {name}/\n"
-            prompt += "\nThese repositories contain source code you can read or modify.\n\n"
+            session_id = os.getenv('AGENTIC_SESSION_NAME', '').strip()
+            feature_branch = f"ambient/{session_id}" if session_id else None
+            
+            repo_names = [repo.get('name', f'repo-{i}') for i, repo in enumerate(repos_cfg)]
+            if len(repo_names) <= 5:
+                prompt += f"**Repositories**: {', '.join([f'repos/{name}/' for name in repo_names])}\n"
+            else:
+                prompt += f"**Repositories** ({len(repo_names)} total): {', '.join([f'repos/{name}/' for name in repo_names[:5]])}, and {len(repo_names) - 5} more\n"
+            
+            if feature_branch:
+                prompt += f"**Working Branch**: `{feature_branch}` (all repos are on this feature branch)\n\n"
+            else:
+                prompt += "\n"
 
+            # Add git push instructions for repos with autoPush enabled
+            auto_push_repos = [repo for repo in repos_cfg if repo.get('autoPush', False)]
+            if auto_push_repos:
+                push_branch = feature_branch or "ambient/<session-id>"
+                
+                prompt += "## Git Push Instructions\n\n"
+                prompt += "The following repositories have auto-push enabled. When you make changes to these repositories, you MUST commit and push your changes:\n\n"
+                for repo in auto_push_repos:
+                    repo_name = repo.get('name', 'unknown')
+                    prompt += f"- **repos/{repo_name}/**\n"
+                prompt += "\nAfter making changes to any auto-push repository:\n"
+                prompt += "1. Use `git add` to stage your changes\n"
+                prompt += "2. Use `git commit -m \"description\"` to commit with a descriptive message\n"
+                prompt += f"3. Use `git push origin {push_branch}` to push to the remote repository\n\n"
+
+        # MCP Integration Setup Instructions
+        prompt += "## MCP Integrations\n"
+        prompt += "If you need Google Drive access: Ask user to go to Integrations page in Ambient and authenticate with Google Drive.\n"
+        prompt += "If you need Jira access: Ask user to go to Workspace Settings in Ambient and configure Jira credentials there.\n\n"
+
+        # Workflow instructions (if any)
         if ambient_config.get("systemPrompt"):
             prompt += f"## Workflow Instructions\n{ambient_config['systemPrompt']}\n\n"
-
-        prompt += "## Navigation\n"
-        prompt += "All directories are accessible via relative or absolute paths.\n"
 
         return prompt
 
 
     async def _setup_google_credentials(self):
-        """Copy Google OAuth credentials from mounted Secret to writable workspace location."""
-        # Check if Google OAuth secret is mounted
+        """Copy Google OAuth credentials from mounted Secret to writable workspace location.
+        
+        The secret is always mounted (as placeholder if user hasn't authenticated).
+        This method checks if credentials.json exists and has content.
+        Call refresh_google_credentials() periodically to pick up new credentials after OAuth.
+        """
+        await self._try_copy_google_credentials()
+
+    async def _try_copy_google_credentials(self) -> bool:
+        """Attempt to copy Google credentials from mounted secret.
+        
+        Returns:
+            True if credentials were successfully copied, False otherwise.
+        """
         secret_path = Path("/app/.google_workspace_mcp/credentials/credentials.json")
+        
+        # Check if secret file exists
         if not secret_path.exists():
-            logging.debug("Google OAuth credentials not found at %s, skipping setup", secret_path)
-            return
+            logging.debug("Google OAuth credentials not found at %s (placeholder secret or not mounted)", secret_path)
+            return False
+        
+        # Check if file has content (not empty placeholder)
+        try:
+            if secret_path.stat().st_size == 0:
+                logging.debug("Google OAuth credentials file is empty (user hasn't authenticated yet)")
+                return False
+        except OSError as e:
+            logging.debug("Could not stat Google OAuth credentials file: %s", e)
+            return False
 
         # Create writable credentials directory in workspace
         workspace_creds_dir = Path("/workspace/.google_workspace_mcp/credentials")
@@ -1479,5 +1444,41 @@ class ClaudeCodeAdapter:
             # Make it writable so workspace-mcp can update tokens
             dest_path.chmod(0o644)
             logging.info("✓ Copied Google OAuth credentials from Secret to writable workspace at %s", dest_path)
+            return True
         except Exception as e:
             logging.error("Failed to copy Google OAuth credentials: %s", e)
+            return False
+
+    async def refresh_google_credentials(self) -> bool:
+        """Check for and copy new Google OAuth credentials.
+        
+        Call this method periodically (e.g., before processing a message) to detect
+        when a user completes the OAuth flow and credentials become available.
+        
+        Kubernetes automatically updates the mounted secret volume when the secret
+        changes (typically within ~60 seconds), so this will pick up new credentials
+        without requiring a pod restart.
+        
+        Returns:
+            True if new credentials were found and copied, False otherwise.
+        """
+        dest_path = Path("/workspace/.google_workspace_mcp/credentials/credentials.json")
+        
+        # If we already have credentials in workspace, check if source is newer
+        if dest_path.exists():
+            secret_path = Path("/app/.google_workspace_mcp/credentials/credentials.json")
+            if secret_path.exists():
+                try:
+                    # Compare modification times - secret mount updates when K8s syncs
+                    if secret_path.stat().st_mtime > dest_path.stat().st_mtime:
+                        logging.info("Detected updated Google OAuth credentials, refreshing...")
+                        return await self._try_copy_google_credentials()
+                except OSError:
+                    pass
+            return False
+        
+        # No credentials yet, try to copy
+        if await self._try_copy_google_credentials():
+            logging.info("✓ Google OAuth credentials now available (user completed authentication)")
+            return True
+        return False
