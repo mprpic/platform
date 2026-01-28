@@ -107,15 +107,21 @@ async def lifespan(app: FastAPI):
     if is_resume:
         logger.info("IS_RESUME=true - this is a resumed session")
 
-    # INITIAL_PROMPT is no longer auto-executed on startup
-    # User must explicitly send the first message to start the conversation
-    # Workflow greetings are still triggered when a workflow is activated
+    
+    # Check if session is interactive
+    is_interactive = os.getenv("INTERACTIVE", "true").strip().lower() == "true"
+    
+    # For non-interactive sessions, auto-execute INITIAL_PROMPT on startup
+    # For interactive sessions, user must explicitly send the first message
     initial_prompt = os.getenv("INITIAL_PROMPT", "").strip()
     if initial_prompt:
-        logger.info(
-            f"INITIAL_PROMPT detected ({len(initial_prompt)} chars) but not auto-executing (user will send first message)"
-        )
-
+        if not is_interactive and not is_resume:
+            logger.info(f"INITIAL_PROMPT detected ({len(initial_prompt)} chars) - auto-executing for non-interactive session")
+            asyncio.create_task(auto_execute_initial_prompt(initial_prompt, session_id))
+        else:
+            mode = "resumed" if is_resume else "interactive"
+            logger.info(f"INITIAL_PROMPT detected ({len(initial_prompt)} chars) but not auto-executing ({mode} session - user will send first message)")
+    
     logger.info(f"AG-UI server ready for session {session_id}")
 
     yield
