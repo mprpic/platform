@@ -2177,7 +2177,6 @@ export default function ProjectSessionDetailPage({
                         setChatInput={setChatInput}
                         onSendChat={() => Promise.resolve(sendChat())}
                         onInterrupt={aguiInterrupt}
-                        onEndSession={() => Promise.resolve(handleEndSession())}
                         onGoToResults={() => {}}
                         onContinue={handleContinue}
                         workflowMetadata={workflowMetadata}
