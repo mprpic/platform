@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -517,15 +519,44 @@ func ContentWorkflowMetadata(c *gin.Context) {
 					shortCommand = commandName[lastDot+1:]
 				}
 
+				// Parse order field from frontmatter, default to MaxInt32 for unordered commands
+				order := int(^uint(0) >> 1) // MaxInt
+				if orderStr := metadata["order"]; orderStr != "" {
+					if parsed, err := strconv.Atoi(orderStr); err == nil {
+						order = parsed
+					}
+				}
+
 				commands = append(commands, map[string]interface{}{
 					"id":           commandName,
 					"name":         displayName,
 					"description":  metadata["description"],
 					"slashCommand": "/" + shortCommand,
 					"icon":         metadata["icon"],
+					"order":        order,
 				})
 			}
 		}
+
+		// Sort commands by order field (ascending)
+		sort.Slice(commands, func(i, j int) bool {
+			iOrder, iOk := commands[i]["order"].(int)
+			jOrder, jOk := commands[j]["order"].(int)
+			if !iOk {
+				iOrder = int(^uint(0) >> 1) // MaxInt
+			}
+			if !jOk {
+				jOrder = int(^uint(0) >> 1) // MaxInt
+			}
+			// If orders are equal, sort alphabetically by id for consistent ordering
+			if iOrder == jOrder {
+				iID, _ := commands[i]["id"].(string)
+				jID, _ := commands[j]["id"].(string)
+				return iID < jID
+			}
+			return iOrder < jOrder
+		})
+
 		log.Printf("ContentWorkflowMetadata: found %d commands", len(commands))
 	} else {
 		log.Printf("ContentWorkflowMetadata: commands directory not found or unreadable: %v", err)
