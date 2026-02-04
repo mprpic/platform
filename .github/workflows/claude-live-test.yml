@@ -142,13 +142,20 @@ jobs:
       run: |
         mkdir -p /tmp/mcp /tmp/test_output
         
-        # Create minimal MCP config - server handles its own configuration
+        # Create MCP config with video and trace recording
         cat > /tmp/mcp/playwright-config.json << 'EOF'
         {
           "mcpServers": {
             "playwright": {
               "command": "npx",
-              "args": ["@playwright/mcp"]
+              "args": [
+                "@playwright/mcp",
+                "--headless",
+                "--caps", "testing,pdf,vision",
+                "--save-trace",
+                "--save-video=1280x720",
+                "--output-dir", "/tmp/test_output"
+              ]
             }
           }
         }
@@ -162,28 +169,40 @@ jobs:
       env:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_BODY: ${{ github.event.pull_request.body }}
+        PR_ADDITIONS: ${{ github.event.pull_request.additions }}
+        PR_DELETIONS: ${{ github.event.pull_request.deletions }}
+        PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        PR_DIFF_URL: ${{ github.event.pull_request.diff_url }}
       run: |
-        # Create prompt with proper escaping
+        # Create prompt with full PR context
         cat > /tmp/test-prompt.txt << 'PROMPT_EOF'
-        You are testing a web application for this PR using Playwright MCP browser tools.
+        You are performing exploratory testing using Playwright MCP browser tools.
 
-        PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}
-        App URL: http://localhost
-        Test workspace name: e2e-claude-test-${{ github.event.pull_request.number }}
+        ## PR Information
+        **PR #${{ github.event.pull_request.number }}**: ${{ github.event.pull_request.title }}
 
-        IMPORTANT: You have browser automation tools from Playwright MCP
+        **Description:**
+        ${{ github.event.pull_request.body }}
 
-        FIRST ACTION: Run mcp__playwright__browser_navigate to http://localhost
+        **Changes:**
+        - Files changed: ${{ github.event.pull_request.changed_files }}
+        - Lines added: +${{ github.event.pull_request.additions }}
+        - Lines deleted: -${{ github.event.pull_request.deletions }}
+        - Diff: ${{ github.event.pull_request.diff_url }}
 
-        Then:
-        - Run mcp__playwright__browser_snapshot to see the page
-        - Use mcp__playwright__browser_click to interact with UI
-        - Create workspace: e2e-claude-test-${{ github.event.pull_request.number }}
-        - Test the features
-        - Take screenshots with mcp__playwright__browser_take_screenshot
-        - Write summary to /tmp/test_output/test_report.md
+        ## Test Environment
+        - App URL: http://localhost
+        - Test workspace: e2e-claude-test-${{ github.event.pull_request.number }}
 
-        Focus on testing the race condition fix for rapid project deletions.
+        ## Your Mission
+        1. Gain na understanding of the PR changes and how you will manually test them using the browser tools. ONLY test the specific features/fixes mentioned in the PR.
+        1. Navigate to http://localhost
+        2. Create test workspace: e2e-claude-test-${{ github.event.pull_request.number }}
+        6. Take screenshots at key moments
+        7. Write findings to /tmp/test_output/test_report.md
+
+        Video/trace recording is automatic. Focus on thorough testing of the PR changes.
         PROMPT_EOF
         
         # Save to output
@@ -207,10 +226,10 @@ jobs:
         show_full_output: true
         claude_args: |
           --mcp-config /tmp/mcp/playwright-config.json
-          --max-turns 30
-          --model claude-sonnet-4-5-20250929
-          --allowedTools "mcp__playwright__*,Read,Write,List"
-          --disallowedTools "Bash,WebFetch"
+          --max-turns 50
+          --model claude-haiku-4-5-20251001
+          --allowedTools "mcp__playwright__*,Read,Write,List,WebFetch"
+          --disallowedTools "Bash"
           --debug
 
     - name: Upload test report and screenshots
