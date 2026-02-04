@@ -141,30 +141,21 @@ jobs:
     - name: Create MCP configuration for Playwright
       run: |
         mkdir -p /tmp/mcp /tmp/test_output
+        
+        # Create minimal MCP config - server handles its own configuration
         cat > /tmp/mcp/playwright-config.json << 'EOF'
         {
           "mcpServers": {
             "playwright": {
               "command": "npx",
-              "args": [
-                "@playwright/mcp",
-                "--base-url", "http://localhost",
-                "--output-dir", "/tmp/test_output",
-                "--caps", "testing,pdf,tracing,vision",
-                "--headless"
-              ]
+              "args": ["@playwright/mcp"]
             }
           }
         }
         EOF
+        
         echo "✅ MCP config created"
         cat /tmp/mcp/playwright-config.json
-        
-    - name: Test MCP server manually
-      run: |
-        echo "Testing if Playwright MCP server can start..."
-        timeout 10 npx @playwright/mcp --base-url http://localhost --output-dir /tmp/test_output --caps testing --headless || true
-        echo "MCP server test complete"
 
     - name: Create test prompt for Claude
       id: prompt
@@ -182,14 +173,15 @@ jobs:
 
         IMPORTANT: You have browser automation tools from Playwright MCP
 
-        Your testing steps:
-        1. Use playwright_browser_navigate to go to http://localhost
-        2. Use playwright_browser_snapshot to see the page structure
-        3. Click "New Workspace" button using playwright_browser_click
-        4. Create workspace: e2e-claude-test-${{ github.event.pull_request.number }}
-        5. Test project deletion - try deleting multiple projects quickly
-        6. Take screenshots with playwright_browser_take_screenshot
-        7. Write findings to /tmp/test_output/test_report.md using the Write tool
+        FIRST ACTION: Run browser_navigate to http://localhost
+
+        Then:
+        - Run browser_snapshot to see the page
+        - Use browser_click to interact with UI
+        - Create workspace: e2e-claude-test-${{ github.event.pull_request.number }}
+        - Test the features
+        - Take screenshots with browser_take_screenshot
+        - Write summary to /tmp/test_output/test_report.md
 
         Focus on testing the race condition fix for rapid project deletions.
         PROMPT_EOF
@@ -207,6 +199,7 @@ jobs:
       uses: anthropics/claude-code-action@v1
       env:
         TEST_TOKEN: ${{ steps.token.outputs.token }}
+        DEBUG: "*"
       with:
         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
         github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -216,8 +209,9 @@ jobs:
           --mcp-config /tmp/mcp/playwright-config.json
           --max-turns 30
           --model claude-sonnet-4-5-20250929
-          --allowedTools "playwright_*,Read,Write,List"
+          --allowedTools "browser_*,Read,Write,List"
           --disallowedTools "Bash,WebFetch"
+          --debug
 
     - name: Upload test report and screenshots
       if: always()
