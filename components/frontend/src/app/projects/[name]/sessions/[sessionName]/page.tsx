@@ -2182,7 +2182,7 @@ export default function ProjectSessionDetailPage({
                         workflowMetadata={workflowMetadata}
                         onCommandClick={handleCommandClick}
                         isRunActive={isRunActive}
-                          showWelcomeExperience={!["Completed", "Failed", "Stopped", "Stopping"].includes(session?.status?.phase || "")}
+                        showWelcomeExperience={!["Completed", "Failed", "Stopped", "Stopping"].includes(session?.status?.phase || "")}
                         activeWorkflow={workflowManagement.activeWorkflow}
                         userHasInteracted={userHasInteracted}
                         queuedMessages={sessionQueue.messages}
