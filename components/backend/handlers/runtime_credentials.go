@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -18,6 +19,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes"
 )
+
+// identityAPITimeout is the HTTP client timeout for GitHub/GitLab user identity API calls.
+const identityAPITimeout = 10 * time.Second
 
 // GetGitHubTokenForSession handles GET /api/projects/:project/agentic-sessions/:session/credentials/github
 // Returns PAT (priority 1) or freshly minted GitHub App token (priority 2)
@@ -81,7 +85,19 @@ func GetGitHubTokenForSession(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"token": token})
+	// Fetch user identity from GitHub API for git config
+	// Fix for: GitHub credentials aren't mounted to session - need git identity
+	userName, userEmail := fetchGitHubUserIdentity(c.Request.Context(), token)
+	if userName != "" {
+		log.Printf("Returning GitHub credentials with identity for session %s/%s", project, session)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"token":    token,
+		"userName": userName,
+		"email":    userEmail,
+		"provider": "github",
+	})
 }
 
 // GetGoogleCredentialsForSession handles GET /api/projects/:project/agentic-sessions/:session/credentials/google
@@ -296,9 +312,19 @@ func GetGitLabTokenForSession(c *gin.Context) {
 		return
 	}
 
+	// Fetch user identity from GitLab API for git config
+	// Fix for: need to distinguish between GitHub and GitLab providers
+	userName, userEmail := fetchGitLabUserIdentity(c.Request.Context(), creds.Token, creds.InstanceURL)
+	if userName != "" {
+		log.Printf("Returning GitLab credentials with identity for session %s/%s", project, session)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"token":       creds.Token,
 		"instanceUrl": creds.InstanceURL,
+		"userName":    userName,
+		"email":       userEmail,
+		"provider":    "gitlab",
 	})
 }
 
@@ -355,7 +381,7 @@ func exchangeOAuthToken(ctx context.Context, tokenURL string, payload map[string
 		form.Set(k, v)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: identityAPITimeout}
 	resp, err := client.Post(tokenURL, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
@@ -372,4 +398,137 @@ func exchangeOAuthToken(ctx context.Context, tokenURL string, payload map[string
 	}
 
 	return &tokenResp, nil
+}
+
+// fetchGitHubUserIdentity fetches user name and email from GitHub API
+// Returns the user's name (or login as fallback) and email for git config
+func fetchGitHubUserIdentity(ctx context.Context, token string) (userName, email string) {
+	if token == "" {
+		return "", ""
+	}
+
+	if ctx.Err() != nil {
+		return "", ""
+	}
+
+	client := &http.Client{Timeout: identityAPITimeout}
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/user", nil)
+	if err != nil {
+		log.Printf("Failed to create GitHub user request: %v", err)
+		return "", ""
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Failed to fetch GitHub user: %v", err)
+		return "", ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		if resp.StatusCode == http.StatusForbidden {
+			log.Printf("GitHub API /user returned 403 (token may lack 'read:user' scope): %s", string(errBody))
+		} else {
+			log.Printf("GitHub API /user returned status %d: %s", resp.StatusCode, string(errBody))
+		}
+		return "", ""
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Failed to read GitHub user response: %v", err)
+		return "", ""
+	}
+
+	var ghUser struct {
+		Login string `json:"login"`
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(body, &ghUser); err != nil {
+		log.Printf("Failed to parse GitHub user response: %v", err)
+		return "", ""
+	}
+
+	// Use Name if available, fall back to Login
+	userName = ghUser.Name
+	if userName == "" {
+		userName = ghUser.Login
+	}
+	email = ghUser.Email
+
+	log.Printf("Fetched GitHub user identity: name=%q hasEmail=%t", userName, email != "")
+	return userName, email
+}
+
+// fetchGitLabUserIdentity fetches user name and email from GitLab API
+// Returns the user's name and email for git config
+func fetchGitLabUserIdentity(ctx context.Context, token, instanceURL string) (userName, email string) {
+	if token == "" {
+		return "", ""
+	}
+
+	if ctx.Err() != nil {
+		return "", ""
+	}
+
+	// Default to gitlab.com if no instance URL
+	apiURL := "https://gitlab.com/api/v4/user"
+	if instanceURL != "" && instanceURL != "https://gitlab.com" {
+		apiURL = strings.TrimSuffix(instanceURL, "/") + "/api/v4/user"
+	}
+
+	client := &http.Client{Timeout: identityAPITimeout}
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		log.Printf("Failed to create GitLab user request: %v", err)
+		return "", ""
+	}
+
+	req.Header.Set("PRIVATE-TOKEN", token)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Failed to fetch GitLab user: %v", err)
+		return "", ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		log.Printf("GitLab API /user returned status %d: %s", resp.StatusCode, string(errBody))
+		return "", ""
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Failed to read GitLab user response: %v", err)
+		return "", ""
+	}
+
+	var glUser struct {
+		Username string `json:"username"`
+		Name     string `json:"name"`
+		Email    string `json:"email"`
+	}
+	if err := json.Unmarshal(body, &glUser); err != nil {
+		log.Printf("Failed to parse GitLab user response: %v", err)
+		return "", ""
+	}
+
+	// Use Name if available, fall back to Username
+	userName = glUser.Name
+	if userName == "" {
+		userName = glUser.Username
+	}
+	email = glUser.Email
+
+	log.Printf("Fetched GitLab user identity: name=%q hasEmail=%t", userName, email != "")
+	return userName, email
 }
