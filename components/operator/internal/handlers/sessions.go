@@ -1148,10 +1148,6 @@ func handleAgenticSessionEvent(obj *unstructured.Unstructured) error {
 					ReadOnlyRootFilesystem:   boolPtr(false),
 					Capabilities: &corev1.Capabilities{
 						Drop: []corev1.Capability{"ALL"},
-						// DAC_READ_SEARCH allows reading files/dirs regardless of permission bits.
-						// Needed because repos cloned at runtime by the runner (UID 1001) have 700
-						// permissions, and state-sync runs as root with all caps dropped.
-						Add: []corev1.Capability{"DAC_READ_SEARCH"},
 					},
 				},
 				Env: []corev1.EnvVar{
